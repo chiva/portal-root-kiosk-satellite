@@ -32,6 +32,12 @@ constexpr char kPresenceFps[] =
     PORTAL_UID1000_DATA_DIRECTORY "/presence-fps";
 constexpr char kWirelessAdbEnabled[] =
     PORTAL_UID1000_DATA_DIRECTORY "/wireless-adb-enabled";
+constexpr char kSystemThemeControlEnabled[] =
+    PORTAL_UID1000_DATA_DIRECTORY "/system-theme-control-enabled";
+// Android's debug_prop is writable by UID 2000 and non-persistent. The
+// root-owned marker above is the durable capability gate.
+constexpr char kSystemThemeProperty[] = "debug.portal.system_theme";
+constexpr char kSystemThemeTag[] = "PortalSystemTheme";
 constexpr char kClientLibrary[] =
     "/system/lib64/privacystate_client1.0.so";
 constexpr char kConstructor[] =
@@ -273,6 +279,49 @@ int run_command(const char *const arguments[]) {
   }
 }
 
+enum class SystemTheme {
+  kNone,
+  kLight,
+  kDark,
+};
+
+SystemTheme requested_system_theme() {
+  char value[PROP_VALUE_MAX]{};
+  if (__system_property_get(kSystemThemeProperty, value) <= 0) {
+    return SystemTheme::kNone;
+  }
+  if (strcmp(value, "light") == 0) return SystemTheme::kLight;
+  if (strcmp(value, "dark") == 0) return SystemTheme::kDark;
+  return SystemTheme::kNone;
+}
+
+[[noreturn]] void activate_system_theme_control() {
+  SystemTheme applied = SystemTheme::kNone;
+  for (;;) {
+    SystemTheme requested = requested_system_theme();
+    if (requested == SystemTheme::kNone) {
+      applied = SystemTheme::kNone;
+    } else if (requested != applied) {
+      const char *const light[] = {
+          "/system/bin/cmd", "uimode", "night", "no", nullptr};
+      const char *const dark[] = {
+          "/system/bin/cmd", "uimode", "night", "yes", nullptr};
+      const char *const *arguments =
+          requested == SystemTheme::kDark ? dark : light;
+      int status = run_command(arguments);
+      __android_log_print(
+          status == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+          kSystemThemeTag,
+          "system theme request mode=%s uid=%d status=%d",
+          requested == SystemTheme::kDark ? "dark" : "light", getuid(),
+          status);
+      if (status == 0) applied = requested;
+      if (status != 0) sleep(2);
+    }
+    usleep(250000);
+  }
+}
+
 bool omni_wireless_adb_requested() {
   char device[PROP_VALUE_MAX]{};
   char port[PROP_VALUE_MAX]{};
@@ -305,6 +354,8 @@ int portal_watchdog_main(int argc, char **argv) {
   bool wireless_adb_enabled =
       access(kWirelessAdbEnabled, R_OK) == 0 ||
       omni_wireless_adb_requested();
+  bool system_theme_control_enabled =
+      access(kSystemThemeControlEnabled, R_OK) == 0;
   int presence_fps = read_presence_fps();
   for (int index = 1; index < argc; ++index) {
     if (strcmp(argv[index], "--camera") == 0) {
@@ -343,6 +394,19 @@ int portal_watchdog_main(int argc, char **argv) {
                           getuid(), strerror(errno));
     }
   }
+  pid_t system_theme_worker = -1;
+  if (system_theme_control_enabled) {
+    system_theme_worker = fork();
+    if (system_theme_worker == 0) {
+      close(singleton);
+      activate_system_theme_control();
+    }
+    if (system_theme_worker < 0) {
+      __android_log_print(ANDROID_LOG_ERROR, kSystemThemeTag,
+                          "could not start system theme worker uid=%d: %s",
+                          getuid(), strerror(errno));
+    }
+  }
 
   if (!camera_enabled) {
     if (presence_worker > 0) {
@@ -353,8 +417,13 @@ int portal_watchdog_main(int argc, char **argv) {
       int status = 0;
       while (waitpid(wireless_adb_worker, &status, 0) < 0 && errno == EINTR) {}
     }
+    if (system_theme_worker > 0) {
+      int status = 0;
+      while (waitpid(system_theme_worker, &status, 0) < 0 && errno == EINTR) {}
+    }
     close(singleton);
-    return presence_fps != 0 || wireless_adb_enabled ? 0 : 1;
+    return presence_fps != 0 || wireless_adb_enabled ||
+        system_theme_control_enabled ? 0 : 1;
   }
 
   void *library = dlopen(kClientLibrary, RTLD_NOW | RTLD_LOCAL);

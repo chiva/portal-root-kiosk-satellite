@@ -53,6 +53,7 @@ class PortalTarget:
     uid1000_hook_artifact: str = "portal-uid1000-hook.bin"
     uid1000_embedded_helper: bool = False
     uid1000_installer_credentials: bool = False
+    system_theme_uid1000_required: bool = False
     audio_java_fallback: bool = False
     audio_deferred_ctl: bool = False
     audio_installer_credentials: bool = False
@@ -100,6 +101,7 @@ TARGETS = (
             0x3A72,
         ),
         debloat_component_profile="full",
+        system_theme_uid1000_required=True,
     ),
     PortalTarget(
         key="portal-plus-cipher-4051355900018050",
@@ -131,6 +133,7 @@ TARGETS = (
         recover_watch_result_after_disconnect=True,
         uid1000_host_package="com.facebook.alohasdk.platformsecurestate",
         uid1000_host_label="platformsecurestate",
+        system_theme_uid1000_required=True,
     ),
     PortalTarget(
         key="portal-10-omni-3051355900018050",
@@ -165,6 +168,7 @@ TARGETS = (
         address_discovery_reboot_on_failure=True,
         uid1000_host_package="com.facebook.alohasdk.platformsecurestate",
         uid1000_host_label="platformsecurestate",
+        system_theme_uid1000_required=True,
         wireless_adb_file_property="service.adb.tcp.port",
         wireless_adb_uid1000_boot=True,
         audio_java_fallback=True,
@@ -203,6 +207,7 @@ TARGETS = (
         address_discovery_reboot_on_failure=True,
         uid1000_host_package="com.facebook.alohasdk.platformsecurestate",
         uid1000_host_label="platformsecurestate",
+        system_theme_uid1000_required=True,
         wireless_adb_file_property="service.adb.tcp.port",
         wireless_adb_uid1000_boot=True,
         audio_java_fallback=True,

@@ -48,6 +48,7 @@ class PortalTargetSelectionTest(unittest.TestCase):
             terry.uid1000_host_package,
             "com.facebook.alohasdk.platformbatterystate",
         )
+        self.assertTrue(terry.system_theme_uid1000_required)
 
         self.assertEqual(aloha.key, "portal-plus-aloha-1041515800015050")
         self.assertEqual(aloha.stack_route, "ptrace")
@@ -76,6 +77,7 @@ class PortalTargetSelectionTest(unittest.TestCase):
         )
         self.assertTrue(aloha.uid1000_embedded_helper)
         self.assertTrue(aloha.uid1000_installer_credentials)
+        self.assertFalse(aloha.system_theme_uid1000_required)
         self.assertTrue(aloha.meta_accounts_skip_force_stop)
         self.assertTrue(aloha.meta_accounts_package_bootstrap)
         self.assertEqual(
@@ -97,6 +99,7 @@ class PortalTargetSelectionTest(unittest.TestCase):
             cipher.uid1000_host_package,
             "com.facebook.alohasdk.platformsecurestate",
         )
+        self.assertTrue(cipher.system_theme_uid1000_required)
 
         self.assertEqual(omni.key, "portal-10-omni-3051355900018050")
         self.assertEqual(omni.stack_route, "sendmmsg")
@@ -115,6 +118,7 @@ class PortalTargetSelectionTest(unittest.TestCase):
         self.assertTrue(omni.wireless_adb_uid1000_boot)
         self.assertTrue(omni.audio_java_fallback)
         self.assertTrue(omni.audio_deferred_ctl)
+        self.assertTrue(omni.system_theme_uid1000_required)
         self.assertEqual(
             omni.uid1000_host_package,
             "com.facebook.alohasdk.platformsecurestate",
@@ -156,6 +160,7 @@ class PortalTargetSelectionTest(unittest.TestCase):
             "uid1000_host_label",
             "wireless_adb_file_property",
             "wireless_adb_uid1000_boot",
+            "system_theme_uid1000_required",
             "audio_java_fallback",
             "audio_deferred_ctl",
         ):
@@ -221,6 +226,7 @@ class PortalTargetSelectionTest(unittest.TestCase):
             "uid1000_hook_artifact",
             "uid1000_embedded_helper",
             "uid1000_installer_credentials",
+            "system_theme_uid1000_required",
             "audio_java_fallback",
             "audio_installer_credentials",
             "device_owner_system_credentials",

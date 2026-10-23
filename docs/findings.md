@@ -2246,3 +2246,28 @@ accounts, all 196 safe component disables, full-scene presence at the optional
 third-party application updates, and UID-1000 wireless ADB persistence. The
 physical camera cover had to be open for the live presence preflight, as on
 the other camera-equipped models.
+
+174. The first live Portal Go test of `--system-theme-control dark` installed
+the controller marker and patched the expected ART cache, but the requested
+theme remained light and no UID-1000 helper or theme log appeared. Binary
+inspection found that the generic 265-byte boot-hook artifact embedded a stale
+`/data/app/dev.portal.uid1000runtime-...` private-library path from the
+APK-hosted Aloha variant. The installed standalone helper was correct; the ART
+hook simply exited after `execve` could not find that unrelated device-specific
+path. A normal timestamp-based `make all` had treated the contaminated
+untracked output as current.
+
+UID-1000 builds are now forced rather than relying on output mtimes, and the
+provisioner validates that every non-embedded hook contains the exact target
+helper path before staging it. The corrected hook names
+`/data/portal-uid1000/portal-camera-led-watch`. Replacing only that payload and
+restarting its persistent host immediately produced
+`system theme request mode=dark uid=1000 status=0` and changed UiMode from
+`mNightMode=1 (no)` to `mNightMode=2 (yes)`.
+
+Clean Portal Go boots `45f66268-5e99-441e-87ad-d240988d7393` and
+`8f0c4800-a55c-4247-86de-87171c9dca34` both retained the helper and dark mode
+with SELinux enforcing and no temporary root ADB listener. Subsequent live
+requests switched dark to light and back to dark, each from UID 1000 with
+status `0`. Re-running the ordinary provisioner then verified the existing
+controller and completed without an exploit or reboot.

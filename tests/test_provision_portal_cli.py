@@ -20,6 +20,7 @@ from provision_portal import (  # noqa: E402
     PortalProvisioner,
     ProvisionError,
     android_build_environment,
+    build,
     parse_args,
 )
 from meta_debloat_components import (  # noqa: E402
@@ -79,6 +80,181 @@ class PersistentWirelessAdbCliTest(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit):
                 parse_args()
+
+
+class SystemThemeControlCliTest(unittest.TestCase):
+    def test_flag_accepts_only_light_or_dark_without_default_audio(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["provision_portal.py", "--system-theme-control", "dark"],
+        ):
+            arguments = parse_args()
+
+        self.assertEqual(arguments.system_theme_control, "dark")
+        self.assertFalse(arguments.audio)
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["provision_portal.py", "--system-theme-control", "automatic"],
+        ):
+            with self.assertRaises(SystemExit):
+                parse_args()
+
+    def test_android_10_uses_uid1000_but_android_9_uses_shell(self) -> None:
+        targets = {target.key: target for target in TARGETS}
+        with tempfile.TemporaryDirectory() as temporary:
+            provisioner = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                pathlib.Path(temporary),
+                system_theme_control="light",
+            )
+            self.assertEqual(
+                provisioner.requested_actions(),
+                {"system_theme_control": "light"},
+            )
+
+            provisioner.target = targets["portal-10-omni-3051355900018050"]
+            self.assertTrue(provisioner.needs_uid1000_payload())
+            self.assertTrue(provisioner.privileged_requested())
+
+            provisioner.target = targets["portal-plus-aloha-1041515800015050"]
+            self.assertFalse(provisioner.needs_uid1000_payload())
+            self.assertFalse(provisioner.privileged_requested())
+
+    def test_locked_build_sends_a_strict_property_request(self) -> None:
+        target = next(
+            target
+            for target in TARGETS
+            if target.key == "portal-10-omni-3051355900018050"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            provisioner = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                pathlib.Path(temporary),
+                system_theme_control="dark",
+            )
+            provisioner.target = target
+            with (
+                mock.patch.object(
+                    provisioner,
+                    "adb_run",
+                    return_value=subprocess.CompletedProcess([], 0, ""),
+                ) as adb_run,
+                mock.patch("provision_portal.time.sleep"),
+            ):
+                provisioner.apply_system_theme_request()
+
+        self.assertEqual(
+            adb_run.call_args_list,
+            [
+                mock.call(
+                    [
+                        "shell",
+                        "logcat",
+                        "-d",
+                        "-s",
+                        "PortalSystemTheme:*",
+                    ],
+                    timeout=10,
+                ),
+                mock.call(
+                    [
+                        "shell",
+                        "setprop",
+                        "debug.portal.system_theme",
+                        "none",
+                    ],
+                    timeout=5,
+                    check=True,
+                ),
+                mock.call(
+                    [
+                        "shell",
+                        "setprop",
+                        "debug.portal.system_theme",
+                        "dark",
+                    ],
+                    timeout=5,
+                    check=True,
+                ),
+            ],
+        )
+
+    def test_uid1000_payload_rejects_a_hook_for_another_runtime(self) -> None:
+        target = next(
+            target
+            for target in TARGETS
+            if target.key == "portal-go-terry-5051355900018050"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            helper = directory / "helper"
+            hook = directory / "hook"
+            helper.write_bytes(b"helper")
+            hook.write_bytes(
+                b"/data/app/dev.portal.uid1000runtime-stale/lib/arm64/"
+                b"libportal_uid1000_exec.so\0"
+            )
+            provisioner = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                directory,
+                system_theme_control="dark",
+            )
+            provisioner.target = target
+            with (
+                mock.patch.object(
+                    provisioner, "uid1000_helper_local", return_value=helper
+                ),
+                mock.patch.object(
+                    provisioner, "uid1000_hook_local", return_value=hook
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ProvisionError, "does not contain the target helper path"
+                ):
+                    provisioner.validate_uid1000_payload()
+
+                hook.write_bytes(
+                    b"prefix/data/portal-uid1000/portal-camera-led-watch\0suffix"
+                )
+                provisioner.validate_uid1000_payload()
+
+    def test_uid1000_build_does_not_reuse_timestamp_fresh_artifacts(self) -> None:
+        target = next(
+            target
+            for target in TARGETS
+            if target.key == "portal-go-terry-5051355900018050"
+        )
+        with (
+            mock.patch(
+                "provision_portal.android_build_environment", return_value={}
+            ),
+            mock.patch(
+                "provision_portal.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run,
+        ):
+            build(
+                target=target,
+                build_audio=False,
+                build_account=False,
+                build_components=False,
+                build_shizuku=False,
+                build_presence=False,
+                build_uid1000=True,
+                build_sentinel=False,
+            )
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn(
+            ["make", "-B", "-C", str(ROOT / "uid1000-helper"), "all"],
+            commands,
+        )
 
 
 class AndroidBuildEnvironmentTest(unittest.TestCase):

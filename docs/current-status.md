@@ -372,6 +372,38 @@ Installing the exact arm64 `2026.10.11` release through shell Package Manager
 then succeeded; the device reported Kiosk Satellite version code 309 and kept
 its persistent HOME role.
 
+## Runtime system theme control
+
+`--system-theme-control light|dark` now provides a live theme switch for the
+Android 10 builds whose `config_lockDayNightMode` prevents UID 2000 from using
+`cmd uimode`. The first run installs a root-owned
+`system-theme-control-enabled` marker alongside the existing UID-1000 helper.
+The helper polls the shell-settable `debug.portal.system_theme` property and
+maps only `light` and `dark` to hardcoded `cmd uimode night no|yes` argument
+vectors. It never interpolates property contents into a command.
+
+Once installed, changing the property through ADB or a Shizuku-backed Kiosk
+Satellite plugin applies the theme without root or a reboot. Re-running the
+provisioner detects the controller and uses the same runtime path without
+replaying GhostLock. The Android 9 targets retain their already functional
+UID-2000 `cmd uimode` path and do not install this controller. Status reports
+the effective `ui_night_mode`, current trigger property, controller marker,
+and helper process state.
+
+The host unit suite and both standalone and APK-hosted helper builds pass. Live
+Portal Go validation exposed one host-build issue before the controller itself
+could run: a stale generic hook artifact contained an Aloha-style private APK
+library path. The provisioner now always rebuilds UID-1000 artifacts and
+rejects a non-embedded hook unless it contains the target's exact helper path.
+
+After replacing that payload, clean Portal Go boots
+`45f66268-5e99-441e-87ad-d240988d7393` and
+`8f0c4800-a55c-4247-86de-87171c9dca34` both started the helper as UID 1000
+with SELinux enforcing. Live `dark`, `light`, then `dark` requests each logged
+status `0`; Android reported `ui_night_mode=2`, `1`, and `2` respectively. The
+final ordinary provisioner run took the zero-reboot preflight path and reported
+`SYSTEM_THEME_CONTROL_OK` followed by `PROVISION_OK`.
+
 ## Device-local Shizuku
 
 The optional `--shizuku` action installs the pinned official Shizuku
@@ -560,6 +592,7 @@ The firmware policy and live process state establish these feature boundaries:
 | --- | --- | --- |
 | Privacy HAL and green camera indicator | UID 1000 can clear it, but the camera provider rejects capture immediately afterward | Keep the watchdog removed and leave the indicator enabled |
 | Android package, settings, app-op, user, and device-policy services | Permitted by the shared UID and framework service policy | Suitable for future fixed-purpose helpers |
+| Locked Android 10 day/night mode | Permitted with UID 1000's `MODIFY_DAY_NIGHT_MODE`; shell requests are restricted to a two-value property | Use the fixed-purpose system-theme controller rather than granting a generic elevated shell |
 | Camera, virtual-camera, battery-state, MobileConfig, and OTA interfaces | Binder/HIDL access is present | Each API still exposes only its implemented operations; the battery-state HAL is read-only |
 | Meta audio-processing manager | Not directly usable | `system_app` cannot discover the private `fb_audio_manager_service`, and the shared UID is not granted Meta's `PLATFORM_AUDIO` permission; retain the AIService audio watchdog |
 | Charger control | Blocked | Only `chargecontrol_app` can write `sysfs_battery_supply`; `system_app` has no read or write rule for the ISL9538 controls |

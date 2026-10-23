@@ -52,6 +52,7 @@ Persistent features use focused configuration changes or small boot helpers.
 | [Filtering Private DNS](#configure-dns) | Sends DNS to a chosen DNS-over-TLS resolver for network-level filtering. |
 | [Network-provided DNS](#configure-dns) | Uses the DNS server supplied by the local network, including private LAN hostnames. |
 | [Third-party app updates](#allow-kiosk-satellite-and-third-party-app-updates) | Lets correctly signed Kiosk Satellite and other non-Meta APKs update normally. |
+| [Runtime system theme control](#control-the-runtime-system-theme) | Switches locked Android 10 Portals between light and dark mode through a constrained UID-1000 worker. |
 | [Automatic Shizuku startup](#install-shizuku-with-automatic-startup) | Starts Shizuku locally after every boot for apps that need ADB-shell privileges. |
 | [Read-only status](#status-report) | Reports the device, provisioning and runtime state without exploiting or rebooting. |
 | [Dry-run planning](#dry-run-planning) | Shows required tools, actions and reboots before changing the Portal. |
@@ -212,6 +213,7 @@ Add only the extra features you want:
 
 - `--presence-fps-cap 2` to reduce Meta's presence-analysis rate
 - `--dhcp-dns` or `--privacy-dns HOSTNAME` to change DNS behavior
+- `--system-theme-control light|dark` to enable and set live theme control
 - `--shizuku` to install Shizuku with automatic startup
 
 The Portal reboots several times and ends with `PROVISION_OK` plus two
@@ -1097,6 +1099,43 @@ python3 tools/provision_portal.py \
 
 </details>
 
+<a id="control-the-runtime-system-theme"></a>
+<details>
+<summary><strong>Optional add-on:</strong> Control the runtime system theme</summary>
+<p></p>
+
+```sh
+python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --system-theme-control dark
+```
+
+Use `light` instead of `dark` to switch back. On the locked Android 10 builds,
+the first run installs a fixed-purpose controller through the provisioner's
+UID-1000 boot-helper mechanism. Later provisioner runs reuse it and switch the
+live theme without another exploit or reboot. Android 9 builds already allow
+the normal shell `cmd uimode` operation, so the provisioner uses that directly.
+
+The UID-1000 controller does not expose an elevated command shell. It watches
+the `debug.portal.system_theme` Android property and accepts only the exact
+values `light` and `dark`; each maps to a hardcoded `cmd uimode night no` or
+`cmd uimode night yes` invocation. Invalid and empty values are ignored.
+
+This gives a Kiosk Satellite plugin running through Shizuku a narrow runtime
+interface:
+
+```sh
+setprop debug.portal.system_theme dark
+setprop debug.portal.system_theme light
+```
+
+The trigger property is intentionally non-persistent, while Android's selected
+night mode persists normally. The root-owned enable marker and UID-1000 helper
+survive reboots. `--status` reports the effective mode, any current runtime
+request, whether the UID-1000 controller is installed, and whether its helper
+is running.
+
+</details>
+
 <a id="install-shizuku-with-automatic-startup"></a>
 <details>
 <summary><strong>Optional add-on:</strong> Install Shizuku with automatic startup</summary>
@@ -1163,8 +1202,8 @@ python3 tools/provision_portal.py \
 The report includes exact target support, boot and SELinux state, Kiosk
 Satellite version, permissions and Device Owner state, audio and OTA markers,
 remote-wipe protection, debloat and account status, the live presence pipeline,
-Private DNS, Shizuku package and server state, and the last provisioning
-manifest.
+Private DNS, system-theme control, Shizuku package and server state, and the
+last provisioning manifest.
 
 ### Dry-run planning
 

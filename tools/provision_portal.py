@@ -216,6 +216,9 @@ WIRELESS_ADB_INSTALLED_REMOTE = (
 UID1000_HOOK_ACTIVE_REMOTE = (
     "/data/local/tmp/portal-uid1000-hook-active-v1"
 )
+SYSTEM_THEME_PROPERTY = "debug.portal.system_theme"
+SYSTEM_THEME_SETTING = "ui_night_mode"
+SYSTEM_THEME_CONTROL_MARKER = "system-theme-control-enabled"
 UID1000_RUNTIME_PACKAGE = "dev.portal.uid1000runtime"
 UID1000_RUNTIME_APK_LOCAL = (
     ROOT / "uid1000-helper/build/portal-uid1000-runtime.apk"
@@ -263,6 +266,7 @@ class PortalProvisioner:
         remove_shizuku: bool = False,
         disable_camera_light: bool = False,
         restore_camera_light: bool = False,
+        system_theme_control: str | None = None,
         shizuku_apk: pathlib.Path | None = None,
         status_only: bool = False,
         dry_run: bool = False,
@@ -317,6 +321,10 @@ class PortalProvisioner:
         self.remove_shizuku = remove_shizuku
         self.disable_camera_light = disable_camera_light
         self.restore_camera_light = restore_camera_light
+        self.system_theme_control = system_theme_control
+        self.system_theme_control_already_configured = False
+        self.system_theme_control_runtime_verified = False
+        self.system_theme_control_log_count_before = 0
         self.shizuku_apk = shizuku_apk
         self.shizuku_public_key: pathlib.Path | None = None
         self.presence_public_key: pathlib.Path | None = None
@@ -458,10 +466,34 @@ class PortalProvisioner:
         )
         return ROOT / "uid1000-helper/build" / artifact
 
+    def validate_uid1000_payload(self) -> None:
+        if self.target is None:
+            raise ProvisionError(
+                "target must be selected before validating UID 1000"
+            )
+        helper = self.uid1000_helper_local()
+        hook = self.uid1000_hook_local()
+        for path, label in ((helper, "helper"), (hook, "boot hook")):
+            if not path.is_file() or path.stat().st_size == 0:
+                raise ProvisionError(
+                    f"UID-1000 {label} artifact is missing: {path}"
+                )
+        if self.target.uid1000_embedded_helper:
+            return
+        expected_path = (
+            self.target.uid1000_data_directory + "/portal-camera-led-watch"
+        ).encode() + b"\0"
+        if expected_path not in hook.read_bytes():
+            raise ProvisionError(
+                "UID-1000 boot hook does not contain the target helper path; "
+                "rebuild the uid1000-helper artifacts without --skip-build"
+            )
+
     def needs_uid1000_payload(self) -> bool:
         return bool(
             self.disable_camera_light
             or self.presence_fps_action_requested()
+            or self.system_theme_uid1000_action_requested()
             or (
                 self.persist_wireless_adb
                 and self.target
@@ -475,6 +507,16 @@ class PortalProvisioner:
                     or self.restore_presence_fps
                     or self.restore_presence_profile
                 )
+            )
+        )
+
+    def system_theme_uid1000_action_requested(self) -> bool:
+        return bool(
+            self.system_theme_control is not None
+            and not self.system_theme_control_already_configured
+            and (
+                self.target is None
+                or self.target.system_theme_uid1000_required
             )
         )
 
@@ -774,6 +816,8 @@ class PortalProvisioner:
             actions["privacy_dns"] = self.privacy_dns
         if self.presence_fps_cap is not None:
             actions["presence_fps_cap"] = self.presence_fps_cap
+        if self.system_theme_control is not None:
+            actions["system_theme_control"] = self.system_theme_control
         return actions
 
     def tool_revision(self) -> str:
@@ -965,6 +1009,8 @@ class PortalProvisioner:
             "-d",
             "-b",
             "main",
+            "-t",
+            "10000",
             "-v",
             "brief",
             "-e",
@@ -1165,6 +1211,15 @@ class PortalProvisioner:
         )
         camera_light_watchdog_running = bool(
             camera_light_process and camera_light_configured
+        )
+        system_theme_value = shell(
+            "settings", "get", "secure", SYSTEM_THEME_SETTING, timeout=5
+        )
+        system_theme_request = shell(
+            "getprop", SYSTEM_THEME_PROPERTY, timeout=5
+        )
+        system_theme_control_configured = exists(
+            self.uid1000_path(SYSTEM_THEME_CONTROL_MARKER)
         )
         return {
             "schema": 1,
@@ -1440,6 +1495,34 @@ class PortalProvisioner:
                     shizuku_process.split()[0] if shizuku_process else None
                 ),
             },
+            "system_theme_control": {
+                "mode": (
+                    "light"
+                    if system_theme_value == "1"
+                    else "dark"
+                    if system_theme_value == "2"
+                    else "auto"
+                    if system_theme_value == "0"
+                    else None
+                ),
+                "setting_value": (
+                    int(system_theme_value)
+                    if system_theme_value.isdigit()
+                    else None
+                ),
+                "runtime_request": (
+                    system_theme_request
+                    if system_theme_request in {"light", "dark"}
+                    else None
+                ),
+                "uid1000_required": bool(
+                    target and target.system_theme_uid1000_required
+                ),
+                "uid1000_control_configured": (
+                    system_theme_control_configured
+                ),
+                "helper_running": bool(camera_light_process),
+            },
             "camera_light": {
                 "state": (
                     "installed"
@@ -1515,6 +1598,7 @@ class PortalProvisioner:
                 self.remove_shizuku,
                 self.disable_camera_light,
                 self.restore_camera_light,
+                self.system_theme_uid1000_action_requested(),
             )
         )
 
@@ -1533,6 +1617,7 @@ class PortalProvisioner:
         privacy = status.get("privacy_dns", {})
         app_updates = status.get("app_updates", {})
         shizuku = status.get("shizuku", {})
+        system_theme = status.get("system_theme_control", {})
         camera_light = status.get("camera_light", {})
         runtime = status.get("runtime", {})
         current = {
@@ -1563,6 +1648,9 @@ class PortalProvisioner:
             "privacy_dns": privacy if isinstance(privacy, dict) else None,
             "app_updates": app_updates if isinstance(app_updates, dict) else None,
             "shizuku": shizuku if isinstance(shizuku, dict) else None,
+            "system_theme_control": (
+                system_theme if isinstance(system_theme, dict) else None
+            ),
             "camera_light": (
                 camera_light if isinstance(camera_light, dict) else None
             ),
@@ -1604,6 +1692,7 @@ class PortalProvisioner:
                     "kiosk_permissions",
                     "disable_adb_auth_timeout",
                     "restore_adb_auth_timeout",
+                    "system_theme_control",
                 }
                 else 2
             ),
@@ -2965,6 +3054,159 @@ class PortalProvisioner:
             )
         print("SHIZUKU_REMOVED_OK packages=absent server=absent")
 
+    def apply_system_theme_request(self) -> None:
+        if self.system_theme_control not in {"light", "dark"}:
+            raise ProvisionError("system theme must be light or dark")
+        if self.target and self.target.system_theme_uid1000_required:
+            expected_log = (
+                "system theme request "
+                f"mode={self.system_theme_control} uid=1000 status=0"
+            )
+            prior_logs = self.adb_run(
+                ["shell", "logcat", "-d", "-s", "PortalSystemTheme:*"],
+                timeout=10,
+            ).stdout
+            self.system_theme_control_log_count_before = prior_logs.count(
+                expected_log
+            )
+            self.adb_run(
+                ["shell", "setprop", SYSTEM_THEME_PROPERTY, "none"],
+                timeout=5,
+                check=True,
+            )
+            # Ensure the 250 ms worker observes an ignored edge even when the
+            # requested value is the same as its preceding request.
+            time.sleep(1)
+            self.adb_run(
+                [
+                    "shell",
+                    "setprop",
+                    SYSTEM_THEME_PROPERTY,
+                    self.system_theme_control,
+                ],
+                timeout=5,
+                check=True,
+            )
+            transport = "uid1000-property"
+        else:
+            night_mode = "yes" if self.system_theme_control == "dark" else "no"
+            self.adb_run(
+                ["shell", "cmd", "uimode", "night", night_mode],
+                timeout=10,
+                check=True,
+            )
+            transport = "shell-uimode"
+        print(
+            "SYSTEM_THEME_REQUEST "
+            f"mode={self.system_theme_control} transport={transport}",
+            flush=True,
+        )
+
+    def verify_system_theme_control(self, wait_seconds: int = 20) -> None:
+        if self.system_theme_control not in {"light", "dark"}:
+            raise ProvisionError("system theme must be light or dark")
+        uid1000_required = bool(
+            self.target and self.target.system_theme_uid1000_required
+        )
+        if uid1000_required and self.adb_run(
+            [
+                "shell",
+                "test",
+                "-f",
+                self.uid1000_path(SYSTEM_THEME_CONTROL_MARKER),
+            ],
+            timeout=5,
+        ).returncode != 0:
+            raise ProvisionError("UID-1000 system theme control is not installed")
+
+        expected = "2" if self.system_theme_control == "dark" else "1"
+        deadline = time.monotonic() + wait_seconds
+        observed = ""
+        process = ""
+        helper_log = ""
+        while time.monotonic() < deadline:
+            observed = self.adb_run(
+                ["shell", "settings", "get", "secure", SYSTEM_THEME_SETTING],
+                timeout=5,
+            ).stdout.strip()
+            if uid1000_required:
+                processes = self.adb_run(
+                    ["shell", "ps", "-A", "-o", "USER,PID,PPID,NAME,ARGS"],
+                    timeout=10,
+                    check=True,
+                ).stdout
+                process = next(
+                    (
+                        line
+                        for line in processes.splitlines()
+                        if "portal-camera-led-watch" in line
+                        or "portal-led-watc" in line
+                    ),
+                    "",
+                )
+                helper_log = self.adb_run(
+                    ["shell", "logcat", "-d", "-s", "PortalSystemTheme:*"],
+                    timeout=10,
+                ).stdout
+                expected_log = (
+                    "system theme request "
+                    f"mode={self.system_theme_control} uid=1000 status=0"
+                )
+                if helper_log.count(expected_log) > (
+                    self.system_theme_control_log_count_before
+                ):
+                    self.system_theme_control_runtime_verified = True
+            runtime_verified = (
+                self.system_theme_control_runtime_verified
+                or not uid1000_required
+            )
+            if (
+                observed == expected
+                and (process or not uid1000_required)
+                and runtime_verified
+            ):
+                print(
+                    "SYSTEM_THEME_CONTROL_OK "
+                    f"mode={self.system_theme_control} "
+                    f"transport={'uid1000' if uid1000_required else 'shell'}"
+                )
+                return
+            time.sleep(1)
+        raise ProvisionError(
+            "system theme request did not apply: "
+            f"expected={expected} observed={observed!r} process={process!r} "
+            f"helper_log={helper_log[-1000:]!r}"
+        )
+
+    def system_theme_control_preflight(self) -> bool:
+        if self.system_theme_control is None:
+            return False
+        uid1000_required = bool(
+            self.target and self.target.system_theme_uid1000_required
+        )
+        if uid1000_required and self.adb_run(
+            [
+                "shell",
+                "test",
+                "-f",
+                self.uid1000_path(SYSTEM_THEME_CONTROL_MARKER),
+            ],
+            timeout=5,
+        ).returncode != 0:
+            print("SYSTEM_THEME_PREFLIGHT action=install control=absent")
+            return False
+        self.apply_system_theme_request()
+        try:
+            self.verify_system_theme_control(wait_seconds=10)
+        except ProvisionError as exc:
+            print(f"SYSTEM_THEME_PREFLIGHT action=install reason={exc}")
+            return False
+        print(
+            "SYSTEM_THEME_PREFLIGHT action=skip "
+            f"mode={self.system_theme_control} capability=ready"
+        )
+        return True
+
     def recover_actions(self) -> bool:
         state = self.read_state()
         self.adb_run(
@@ -3026,6 +3268,7 @@ class PortalProvisioner:
             "remove_shizuku",
             "disable_camera_light",
             "restore_camera_light",
+            "system_theme_control",
         }
         for name, value in actions.items():
             if name not in allowed:
@@ -3038,6 +3281,12 @@ class PortalProvisioner:
                 if not isinstance(value, int) or not 1 <= value <= 10:
                     raise ProvisionError("invalid presence_fps_cap recovery value")
                 self.presence_fps_cap = value
+            elif name == "system_theme_control":
+                if value not in {"light", "dark"}:
+                    raise ProvisionError(
+                        "invalid system_theme_control recovery value"
+                    )
+                self.system_theme_control = value
             elif value is True:
                 setattr(self, name, True)
             else:
@@ -4082,6 +4331,8 @@ class PortalProvisioner:
             environment["GHOSTLOCK_DISABLE_CAMERA_LIGHT"] = "1"
         if self.restore_camera_light:
             environment["GHOSTLOCK_RESTORE_CAMERA_LIGHT"] = "1"
+        if self.system_theme_uid1000_action_requested():
+            environment["GHOSTLOCK_UID1000_SYSTEM_THEME_CONTROL"] = "1"
         if self.target.uid1000_embedded_helper and self.needs_uid1000_payload():
             if (
                 not self.uid1000_runtime_apk_remote
@@ -4299,6 +4550,19 @@ class PortalProvisioner:
         if self.restore_camera_light:
             expected_markers["camera_light_restore"] = (
                 "UID1000 camera LED helper restore",
+                True,
+            )
+        if self.system_theme_uid1000_action_requested():
+            expected_markers["system_theme_config"] = (
+                "UID1000 system theme control config",
+                True,
+            )
+            expected_markers["system_theme_helper"] = (
+                "UID1000 camera LED helper install",
+                True,
+            )
+            expected_markers["system_theme_hook"] = (
+                "Battery ART boot hook",
                 True,
             )
         observed_markers: set[str] = set()
@@ -4904,6 +5168,7 @@ class PortalProvisioner:
                 self.uid1000_path("camera-led-enabled"),
                 self.uid1000_path("presence-fps"),
                 self.uid1000_path("wireless-adb-enabled"),
+                self.uid1000_path(SYSTEM_THEME_CONTROL_MARKER),
             )
             if self.adb_run(
                 ["shell", "test", "-e", path], timeout=5
@@ -5942,6 +6207,8 @@ class PortalProvisioner:
             self.verify_privacy_dns()
         if self.allow_app_updates or self.restore_app_verifier:
             self.verify_app_verifier_setting()
+        if self.system_theme_control is not None:
+            self.verify_system_theme_control()
         if self.disable_camera_light:
             self.verify_camera_light_disabled()
         if self.restore_camera_light:
@@ -6046,6 +6313,7 @@ class PortalProvisioner:
                 for path in (
                     self.uid1000_path("presence-fps"),
                     self.uid1000_path("wireless-adb-enabled"),
+                    self.uid1000_path(SYSTEM_THEME_CONTROL_MARKER),
                 )
             )
             helper_present = self.adb_run(
@@ -6126,6 +6394,21 @@ class PortalProvisioner:
                 self.create_backup_bundle(self.backup_path)
             return
         self.verify_target()
+        if self.system_theme_control is not None:
+            self.system_theme_control_already_configured = (
+                self.system_theme_control_preflight()
+            )
+            if (
+                self.system_theme_control_already_configured
+                and self.requested_actions()
+                == {"system_theme_control": self.system_theme_control}
+            ):
+                self.write_state("complete")
+                print(
+                    "PROVISION_OK reboots=0 "
+                    f"system_theme={self.system_theme_control} logs={self.log_dir}"
+                )
+                return
         if self.privileged_requested() and not self.skip_build:
             android_build_environment(self.target)
         # Resolve host-side downloads before any exploit bootstrap can reboot the
@@ -6682,6 +6965,8 @@ class PortalProvisioner:
         if self.restore_remote_wipe:
             self.read_remote_wipe_backup(required=True)
         if self.needs_uid1000_payload():
+            if self.skip_build:
+                self.validate_uid1000_payload()
             self.prepare_camera_light_install()
         if self.disable_updates:
             self.disable_ota_packages()
@@ -6724,6 +7009,7 @@ class PortalProvisioner:
             or self.remove_shizuku
             or self.disable_camera_light
             or self.restore_camera_light
+            or self.system_theme_uid1000_action_requested()
         )
         if not privileged_action:
             if self.kiosk_home:
@@ -6735,6 +7021,7 @@ class PortalProvisioner:
                 "kiosk_permissions",
                 "disable_adb_auth_timeout",
                 "restore_adb_auth_timeout",
+                "system_theme_control",
             }:
                 self.verify_requested_state()
                 self.write_state("complete")
@@ -6759,6 +7046,8 @@ class PortalProvisioner:
                 build_uid1000=self.needs_uid1000_payload(),
                 build_sentinel=self.uses_exploit_sentinel(),
             )
+        if self.needs_uid1000_payload():
+            self.validate_uid1000_payload()
         if self.shizuku:
             self.install_shizuku_payload()
         if (
@@ -6849,6 +7138,11 @@ class PortalProvisioner:
                     self.finalize_buffered_shizuku_key()
                 if self.needs_uid1000_payload():
                     self.finalize_buffered_uid1000_markers()
+                if (
+                    self.system_theme_control is not None
+                    and not self.system_theme_control_already_configured
+                ):
+                    self.apply_system_theme_request()
                 if (
                     self.uid1000_runtime_package_installed
                     and not (
@@ -7040,7 +7334,7 @@ def build(
     if build_uid1000:
         commands.append(
             [
-                "make", "-C", str(ROOT / "uid1000-helper"),
+                "make", "-B", "-C", str(ROOT / "uid1000-helper"),
                 target.uid1000_helper_make_target,
             ]
         )
@@ -7170,6 +7464,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "use a local Shizuku APK with --shizuku instead of downloading "
             f"the pinned official {SHIZUKU_VERSION} release"
+        ),
+    )
+    parser.add_argument(
+        "--system-theme-control",
+        choices=("light", "dark"),
+        metavar="{light,dark}",
+        help=(
+            "set the live Android system theme; on locked Android 10 builds, "
+            "install or reuse the constrained UID-1000 theme controller"
         ),
     )
     app_update_group = parser.add_mutually_exclusive_group()
@@ -7433,6 +7736,7 @@ def parse_args() -> argparse.Namespace:
             args.remove_shizuku,
             args.disable_camera_light,
             args.restore_camera_light,
+            args.system_theme_control is not None,
         )
     )
     if args.shizuku_apk and not args.shizuku:
@@ -7497,6 +7801,7 @@ def main() -> int:
             remove_shizuku=args.remove_shizuku,
             disable_camera_light=args.disable_camera_light,
             restore_camera_light=args.restore_camera_light,
+            system_theme_control=args.system_theme_control,
             shizuku_apk=args.shizuku_apk,
             status_only=args.status or args.backup_only,
             dry_run=args.dry_run,
