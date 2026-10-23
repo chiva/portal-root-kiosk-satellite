@@ -1120,12 +1120,21 @@ the `debug.portal.system_theme` Android property and accepts only the exact
 values `light` and `dark`; each maps to a hardcoded `cmd uimode night no` or
 `cmd uimode night yes` invocation. Invalid and empty values are ignored.
 
-This gives a Kiosk Satellite plugin running through Shizuku a narrow runtime
-interface:
+Set the props from ADB like this:
 
 ```sh
 setprop debug.portal.system_theme dark
 setprop debug.portal.system_theme light
+```
+
+It also allows Kiosk Satellite to use its ESPHome action `esphome.device_shizuku_command` from a Home Assistant automation:
+
+```yaml
+- action: esphome.kitchen_tablet_shizuku_command
+  data:
+    command: setprop debug.portal.system_theme dark
+    timeout: 0
+  response_variable: result
 ```
 
 The trigger property is intentionally non-persistent, while Android's selected
