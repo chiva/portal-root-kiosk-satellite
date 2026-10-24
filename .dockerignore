@@ -1,0 +1,9 @@
+.git
+.github
+**/build/
+*.md
+!README.md
+assets/banners
+tests/__pycache__
+**/__pycache__/
+*.pyc
