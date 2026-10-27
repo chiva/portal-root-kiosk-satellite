@@ -4267,11 +4267,7 @@ class PortalProvisioner:
         native_presence_prefs = self.uses_native_presence_prefs()
         if native_presence_prefs:
             environment["GHOSTLOCK_PRESENCE_NATIVE_PREFS"] = "1"
-        if (
-            (self.debloat and not self.debloat_already_configured)
-            or self.restore_bloat
-            or (self.needs_component_ctl() and not native_presence_prefs)
-        ):
+        if self.needs_component_ctl():
             environment.update(
                 {
                     "GHOSTLOCK_COMPONENT_CTL_JAR": COMPONENT_CTL_REMOTE,
@@ -4518,7 +4514,7 @@ class PortalProvisioner:
                 "UID1000 presence helper restore",
                 True,
             )
-        if (self.debloat and not self.debloat_already_configured) or self.restore_bloat:
+        if self.needs_component_ctl():
             expected_markers["component_profile"] = (
                 "component ctl child=",
                 True,

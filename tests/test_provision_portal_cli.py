@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import pathlib
 import shutil
@@ -621,6 +622,69 @@ class RemoteWipeCliTest(unittest.TestCase):
                 provisioner.unexpected_disabled_debloat_components(saved, current),
                 [outside_profile],
             )
+
+    def test_combined_ota_waits_for_remote_wipe_component_actions(self) -> None:
+        target = next(
+            target
+            for target in TARGETS
+            if target.key == "portal-go-terry-5051355900018050"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            provisioner = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                pathlib.Path(temporary),
+                disable_updates=True,
+                debloat=True,
+                block_remote_wipe=True,
+            )
+            provisioner.target = target
+            provisioner.ota_already_configured = False
+            provisioner.debloat_already_configured = True
+            provisioner.remote_wipe_already_configured = False
+            real_popen = subprocess.Popen
+            action_processes: list[subprocess.Popen[bytes]] = []
+
+            def action_process(
+                *args: object, **kwargs: object
+            ) -> subprocess.Popen[bytes]:
+                process = real_popen(
+                    [
+                        "/bin/sh",
+                        "-c",
+                        "printf 'OTA block file install ok=1\\n"
+                        "component ctl child=123 status=00000000 ok=1 "
+                        "uid=0 euid=0\\n'; sleep 30",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                )
+                action_processes.append(process)
+                return process
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(
+                    provisioner,
+                    "adb_run",
+                    return_value=subprocess.CompletedProcess([], 0, ""),
+                ),
+                mock.patch(
+                    "provision_portal.subprocess.Popen",
+                    side_effect=action_process,
+                ),
+                mock.patch.object(sys, "stdout", output),
+            ):
+                self.assertTrue(provisioner.exploit(0x1000, 0x2000, 1))
+            for process in action_processes:
+                assert process.stdout is not None
+                process.stdout.close()
+
+        self.assertIn(
+            "NATIVE_ACTIONS_OK actions=component_profile,ota_block",
+            output.getvalue(),
+        )
 
     def test_combined_component_actions_are_a_single_bootstrap_phase(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
