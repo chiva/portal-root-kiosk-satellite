@@ -8,11 +8,16 @@ Java_PortalUid1000Bootstrap_run(JNIEnv *, jclass, jint configuration) {
   char fps[4]{};
   char program[] = "portal-camera-led-watch";
   char camera[] = "--camera";
+  char adb_framework[] = "--adb-framework";
   char fps_option[] = "--fps";
-  char *arguments[6] = {program, nullptr, nullptr, nullptr, nullptr, nullptr};
+  char *arguments[7] = {
+      program, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   int count = 1;
   if ((configuration & 0x100) != 0) {
     arguments[count++] = camera;
+  }
+  if ((configuration & 0x200) != 0) {
+    arguments[count++] = adb_framework;
   }
   int requested_fps = configuration & 0xff;
   if (requested_fps >= 1 && requested_fps <= 10) {

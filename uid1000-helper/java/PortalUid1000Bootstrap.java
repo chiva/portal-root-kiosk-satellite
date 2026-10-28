@@ -9,6 +9,8 @@ public final class PortalUid1000Bootstrap {
     for (int index = 1; index < arguments.length; ++index) {
       if ("--camera".equals(arguments[index])) {
         configuration |= 0x100;
+      } else if ("--adb-framework".equals(arguments[index])) {
+        configuration |= 0x200;
       } else if ("--fps".equals(arguments[index]) && index + 1 < arguments.length) {
         int fps = Integer.parseInt(arguments[++index]);
         if (fps < 1 || fps > 10) {

@@ -32,12 +32,15 @@ constexpr char kPresenceFps[] =
     PORTAL_UID1000_DATA_DIRECTORY "/presence-fps";
 constexpr char kWirelessAdbEnabled[] =
     PORTAL_UID1000_DATA_DIRECTORY "/wireless-adb-enabled";
+constexpr char kAdbFrameworkEnabled[] =
+    PORTAL_UID1000_DATA_DIRECTORY "/adb-framework-enabled";
 constexpr char kSystemThemeControlEnabled[] =
     PORTAL_UID1000_DATA_DIRECTORY "/system-theme-control-enabled";
 // Android's debug_prop is writable by UID 2000 and non-persistent. The
 // root-owned marker above is the durable capability gate.
 constexpr char kSystemThemeProperty[] = "debug.portal.system_theme";
 constexpr char kSystemThemeTag[] = "PortalSystemTheme";
+constexpr char kAdbFrameworkTag[] = "PortalAdbFramework";
 constexpr char kClientLibrary[] =
     "/system/lib64/privacystate_client1.0.so";
 constexpr char kConstructor[] =
@@ -218,6 +221,56 @@ int run_command(const char *const arguments[]) {
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
+int run_command_capture(const char *const arguments[], char *output,
+                        size_t output_size) {
+  if (output == nullptr || output_size == 0) return -1;
+  output[0] = '\0';
+  int descriptors[2];
+  if (pipe2(descriptors, O_CLOEXEC) != 0) return -1;
+  pid_t child = fork();
+  if (child < 0) {
+    close(descriptors[0]);
+    close(descriptors[1]);
+    return -1;
+  }
+  if (child == 0) {
+    close(descriptors[0]);
+    int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    if (null_fd >= 0) {
+      dup2(null_fd, STDIN_FILENO);
+      dup2(null_fd, STDERR_FILENO);
+      if (null_fd > STDERR_FILENO) close(null_fd);
+    }
+    dup2(descriptors[1], STDOUT_FILENO);
+    close(descriptors[1]);
+    execv(arguments[0], const_cast<char *const *>(arguments));
+    _exit(127);
+  }
+  close(descriptors[1]);
+  size_t used = 0;
+  char discard[128];
+  for (;;) {
+    char *destination = used + 1 < output_size ? output + used : discard;
+    size_t available = used + 1 < output_size
+        ? output_size - used - 1
+        : sizeof(discard);
+    ssize_t count = read(descriptors[0], destination, available);
+    if (count == 0) break;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (destination != discard) used += static_cast<size_t>(count);
+  }
+  close(descriptors[0]);
+  output[used] = '\0';
+  int status = 0;
+  while (waitpid(child, &status, 0) < 0) {
+    if (errno != EINTR) return -1;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 [[noreturn]] void activate_presence(int fps) {
   sleep(15);
   const char *const start[] = {
@@ -275,6 +328,44 @@ int run_command(const char *const arguments[]) {
           getuid(), state[0] ? state : "unset", persist_status,
           persist_errno, none_status, none_errno, adb_status, adb_errno);
     }
+    sleep(10);
+  }
+}
+
+[[noreturn]] void activate_adb_framework() {
+  const char *const get_adb_enabled[] = {
+      "/system/bin/cmd", "settings", "get", "global", "adb_enabled",
+      nullptr};
+  const char *const enable_adb_framework[] = {
+      "/system/bin/cmd", "settings", "put", "global", "adb_enabled", "1",
+      nullptr};
+  unsigned int cycles = 0;
+  for (;;) {
+    // Meta firmware can reset Settings.Global.adb_enabled during boot. Keeping
+    // adbd alive is not enough: existing keys still work, but Android cannot
+    // show the confirmation dialog for a new host. Check frequently while boot
+    // settles, then once per minute, and only write when the value is wrong.
+    if (cycles < 12 || cycles % 6 == 0) {
+      char adb_enabled[32]{};
+      int get_status = run_command_capture(
+          get_adb_enabled, adb_enabled, sizeof(adb_enabled));
+      char *end = adb_enabled + strlen(adb_enabled);
+      while (end > adb_enabled &&
+             (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' ||
+              end[-1] == '\t')) {
+        *--end = '\0';
+      }
+      if (get_status != 0 || strcmp(adb_enabled, "1") != 0) {
+        int put_status = run_command(enable_adb_framework);
+        __android_log_print(
+            put_status == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+            kAdbFrameworkTag,
+            "activation uid=%d previous=%s get_status=%d put_status=%d",
+            getuid(), adb_enabled[0] ? adb_enabled : "unavailable",
+            get_status, put_status);
+      }
+    }
+    ++cycles;
     sleep(10);
   }
 }
@@ -356,6 +447,8 @@ int portal_watchdog_main(int argc, char **argv) {
       omni_wireless_adb_requested();
   bool system_theme_control_enabled =
       access(kSystemThemeControlEnabled, R_OK) == 0;
+  bool adb_framework_enabled =
+      access(kAdbFrameworkEnabled, R_OK) == 0;
   int presence_fps = read_presence_fps();
   for (int index = 1; index < argc; ++index) {
     if (strcmp(argv[index], "--camera") == 0) {
@@ -366,6 +459,8 @@ int portal_watchdog_main(int argc, char **argv) {
       if (end != nullptr && *end == '\0' && value >= 1 && value <= 10) {
         presence_fps = static_cast<int>(value);
       }
+    } else if (strcmp(argv[index], "--adb-framework") == 0) {
+      adb_framework_enabled = true;
     }
   }
   pid_t presence_worker = -1;
@@ -394,6 +489,19 @@ int portal_watchdog_main(int argc, char **argv) {
                           getuid(), strerror(errno));
     }
   }
+  pid_t adb_framework_worker = -1;
+  if (adb_framework_enabled) {
+    adb_framework_worker = fork();
+    if (adb_framework_worker == 0) {
+      close(singleton);
+      activate_adb_framework();
+    }
+    if (adb_framework_worker < 0) {
+      __android_log_print(ANDROID_LOG_ERROR, kAdbFrameworkTag,
+                          "could not start worker uid=%d: %s",
+                          getuid(), strerror(errno));
+    }
+  }
   pid_t system_theme_worker = -1;
   if (system_theme_control_enabled) {
     system_theme_worker = fork();
@@ -417,13 +525,18 @@ int portal_watchdog_main(int argc, char **argv) {
       int status = 0;
       while (waitpid(wireless_adb_worker, &status, 0) < 0 && errno == EINTR) {}
     }
+    if (adb_framework_worker > 0) {
+      int status = 0;
+      while (waitpid(adb_framework_worker, &status, 0) < 0 &&
+             errno == EINTR) {}
+    }
     if (system_theme_worker > 0) {
       int status = 0;
       while (waitpid(system_theme_worker, &status, 0) < 0 && errno == EINTR) {}
     }
     close(singleton);
     return presence_fps != 0 || wireless_adb_enabled ||
-        system_theme_control_enabled ? 0 : 1;
+        adb_framework_enabled || system_theme_control_enabled ? 0 : 1;
   }
 
   void *library = dlopen(kClientLibrary, RTLD_NOW | RTLD_LOCAL);

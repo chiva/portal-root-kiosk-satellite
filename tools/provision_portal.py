@@ -87,6 +87,7 @@ SHIZUKU_APK_SHA256 = (
 )
 STATE_REMOTE = "/data/local/tmp/portal-provision-state-v1.json"
 PRIVACY_BACKUP_REMOTE = "/data/local/tmp/portal-private-dns-before-v1.json"
+ADB_ENABLED_SETTING = "adb_enabled"
 ADB_AUTH_TIMEOUT_SETTING = "adb_allowed_connection_time"
 ADB_AUTH_TIMEOUT_BACKUP_REMOTE = (
     "/data/local/tmp/portal-adb-auth-timeout-before-v1.json"
@@ -213,6 +214,9 @@ CAMERA_LIGHT_RESTORED_REMOTE = (
 WIRELESS_ADB_INSTALLED_REMOTE = (
     "/data/local/tmp/portal-wireless-adb-installed-v1"
 )
+ADB_FRAMEWORK_BOOT_INSTALLED_REMOTE = (
+    "/data/local/tmp/portal-adb-framework-boot-installed-v1"
+)
 UID1000_HOOK_ACTIVE_REMOTE = (
     "/data/local/tmp/portal-uid1000-hook-active-v1"
 )
@@ -277,6 +281,7 @@ class PortalProvisioner:
         disable_adb_auth_timeout: bool = False,
         restore_adb_auth_timeout: bool = False,
         wireless_adb_only: bool = False,
+        adb_framework_only: bool = False,
         meta_accounts_local_only: bool = False,
         meta_accounts_auth_only: bool = False,
         meta_accounts_finalize_only: bool = False,
@@ -343,12 +348,14 @@ class PortalProvisioner:
         )
         self.restore_adb_auth_timeout = restore_adb_auth_timeout
         self.wireless_adb_only = wireless_adb_only
+        self.adb_framework_only = adb_framework_only
         self.meta_accounts_local_only = meta_accounts_local_only
         self.meta_accounts_auth_only = meta_accounts_auth_only
         self.meta_accounts_finalize_only = meta_accounts_finalize_only
         self.adb = ["adb", "-s", serial]
         self.target: PortalTarget | None = None
         self.persist_wireless_adb = False
+        self.adb_framework_boot_configured = False
         self._bugreport_cache: dict[str, str] = {}
         self.exploit_user_ids_runtime: tuple[int, ...] = ()
         self.exploit_users_created: list[int] = []
@@ -494,6 +501,7 @@ class PortalProvisioner:
             self.disable_camera_light
             or self.presence_fps_action_requested()
             or self.system_theme_uid1000_action_requested()
+            or self.adb_framework_boot_install_requested()
             or (
                 self.persist_wireless_adb
                 and self.target
@@ -509,6 +517,36 @@ class PortalProvisioner:
                 )
             )
         )
+
+    def adb_framework_boot_persistence_requested(self) -> bool:
+        return bool(
+            self.persistent_wireless_adb
+            or self.adb_framework_only
+            or self.remove_meta_accounts
+            or (
+                self.disable_adb_auth_timeout
+                and self.privileged_requested()
+            )
+        )
+
+    def adb_framework_boot_install_requested(self) -> bool:
+        return bool(
+            self.adb_framework_boot_persistence_requested()
+            and not self.adb_framework_boot_configured
+        )
+
+    def adb_framework_boot_preflight(self) -> bool:
+        configured = self.adb_run(
+            ["shell", "test", "-f", ADB_FRAMEWORK_BOOT_INSTALLED_REMOTE],
+            timeout=5,
+        ).returncode == 0
+        if self.adb_framework_boot_persistence_requested():
+            print(
+                "ADB_FRAMEWORK_BOOT_PREFLIGHT "
+                f"configured={int(configured)} action="
+                f"{'skip' if configured else 'install'}"
+            )
+        return configured
 
     def system_theme_uid1000_action_requested(self) -> bool:
         return bool(
@@ -1178,6 +1216,9 @@ class PortalProvisioner:
         adb_auth_timeout = shell(
             "settings", "get", "global", ADB_AUTH_TIMEOUT_SETTING, timeout=5
         )
+        adb_enabled = shell(
+            "settings", "get", "global", ADB_ENABLED_SETTING, timeout=5
+        )
         process_list = shell("ps", "-A", "-o", "USER,PID,PPID,NAME,ARGS")
         shizuku_process = next(
             (line for line in process_list.splitlines() if "shizuku_server" in line),
@@ -1251,6 +1292,9 @@ class PortalProvisioner:
                 "wireless_adb_persistence_verified": exists(
                     WIRELESS_ADB_INSTALLED_REMOTE
                 ),
+                "adb_framework_boot_persistence_verified": exists(
+                    ADB_FRAMEWORK_BOOT_INSTALLED_REMOTE
+                ),
                 "adb_auth_allowed_connection_time_ms": (
                     int(adb_auth_timeout)
                     if adb_auth_timeout.isdigit()
@@ -1260,6 +1304,10 @@ class PortalProvisioner:
                 "adb_auth_timeout_backup_present": exists(
                     ADB_AUTH_TIMEOUT_BACKUP_REMOTE
                 ),
+                "adb_enabled_setting": (
+                    int(adb_enabled) if adb_enabled in {"0", "1"} else None
+                ),
+                "adb_authorization_prompts_enabled": adb_enabled == "1",
                 "aiservice_pid": shell(
                     "pidof", "com.facebook.portal.aiservice", timeout=5
                 ),
@@ -1580,6 +1628,7 @@ class PortalProvisioner:
             (
                 self.persistent_wireless_adb,
                 self.wireless_adb_only,
+                self.adb_framework_only,
                 self.audio,
                 self.restore_audio,
                 self.device_owner,
@@ -1656,6 +1705,16 @@ class PortalProvisioner:
             ),
             "adb_auth_timeout_disabled": (
                 runtime.get("adb_auth_timeout_disabled")
+                if isinstance(runtime, dict)
+                else None
+            ),
+            "adb_authorization_prompts_enabled": (
+                runtime.get("adb_authorization_prompts_enabled")
+                if isinstance(runtime, dict)
+                else None
+            ),
+            "adb_framework_boot_persistence_verified": (
+                runtime.get("adb_framework_boot_persistence_verified")
                 if isinstance(runtime, dict)
                 else None
             ),
@@ -1812,6 +1871,53 @@ class PortalProvisioner:
                 check=True,
             )
 
+    def verify_adb_framework_enabled(
+        self, action: str = "verified", wait_seconds: int = 0
+    ) -> None:
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            actual = self.adb_run(
+                ["shell", "settings", "get", "global", ADB_ENABLED_SETTING],
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+            if actual == "1" or time.monotonic() >= deadline:
+                break
+            time.sleep(3)
+        if actual != "1":
+            raise ProvisionError(
+                "Android's ADB framework is disabled, so new host "
+                "authorization prompts cannot appear: "
+                f"{ADB_ENABLED_SETTING}={actual!r}"
+            )
+        print(
+            f"ADB_FRAMEWORK_OK action={action} "
+            f"{ADB_ENABLED_SETTING}={actual} prompts=enabled"
+        )
+
+    def ensure_adb_framework_enabled(self) -> None:
+        before = self.adb_run(
+            ["shell", "settings", "get", "global", ADB_ENABLED_SETTING],
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        if before != "1":
+            self.adb_run(
+                [
+                    "shell",
+                    "settings",
+                    "put",
+                    "global",
+                    ADB_ENABLED_SETTING,
+                    "1",
+                ],
+                timeout=10,
+                check=True,
+            )
+        self.verify_adb_framework_enabled(
+            action="already-enabled" if before == "1" else "enabled"
+        )
+
     def backup_adb_auth_timeout(self) -> None:
         existing = self.adb_run(
             ["shell", "cat", ADB_AUTH_TIMEOUT_BACKUP_REMOTE], timeout=5
@@ -1859,6 +1965,7 @@ class PortalProvisioner:
         return value
 
     def disable_adb_authorization_timeout(self) -> None:
+        self.ensure_adb_framework_enabled()
         self.backup_adb_auth_timeout()
         self.adb_run(
             [
@@ -3321,6 +3428,10 @@ class PortalProvisioner:
         return set() if match is None else set(match.group(1).split())
 
     def meta_accounts_preflight(self) -> bool:
+        # Meta's Debug page is tied to the owner profile and can become empty
+        # after account cleanup. Keep Android's own ADB framework active so a
+        # newly presented host key can still raise its confirmation dialog.
+        self.ensure_adb_framework_enabled()
         accounts = self.meta_accounts()
         self.meta_accounts_absent = not accounts
         disabled = self.disabled_meta_authenticators()
@@ -4059,6 +4170,11 @@ class PortalProvisioner:
                 )
             if self.target.wireless_adb_uid1000_boot:
                 environment["GHOSTLOCK_UID1000_WIRELESS_ADB"] = "1"
+        if self.needs_uid1000_payload() and (
+            self.adb_framework_boot_install_requested()
+            or self.adb_framework_boot_configured
+        ):
+            environment["GHOSTLOCK_UID1000_ADB_FRAMEWORK"] = "1"
         if self.audio and not self.audio_already_configured:
             environment.update(
                 {
@@ -4125,16 +4241,19 @@ class PortalProvisioner:
         )
         private_uid1000_action = (
             self.target.uid1000_installer_credentials
-            and self.requested_actions()
-            in (
-                {"disable_camera_light": True},
-                {"restore_camera_light": True},
-                {"presence_fps_cap": self.presence_fps_cap},
-                {
-                    "optimize_presence": True,
-                    "presence_fps_cap": self.presence_fps_cap,
-                },
-                {"restore_presence_fps": True},
+            and (
+                self.adb_framework_boot_install_requested()
+                or self.requested_actions()
+                in (
+                    {"disable_camera_light": True},
+                    {"restore_camera_light": True},
+                    {"presence_fps_cap": self.presence_fps_cap},
+                    {
+                        "optimize_presence": True,
+                        "presence_fps_cap": self.presence_fps_cap,
+                    },
+                    {"restore_presence_fps": True},
+                )
             )
         )
         preserve_shell_domain = (
@@ -4422,6 +4541,19 @@ class PortalProvisioner:
         if self.persist_wireless_adb:
             expected_markers["wireless_adb"] = (
                 "wireless ADB persistence install",
+                True,
+            )
+        if self.adb_framework_boot_install_requested():
+            expected_markers["adb_framework_config"] = (
+                "UID1000 ADB framework boot config",
+                True,
+            )
+            expected_markers["adb_framework_helper"] = (
+                "UID1000 camera LED helper install",
+                True,
+            )
+            expected_markers["adb_framework_hook"] = (
+                "Battery ART boot hook",
                 True,
             )
         if self.audio and not self.audio_already_configured:
@@ -5140,6 +5272,10 @@ class PortalProvisioner:
                     "/data/local/tmp/portal-presence-backup/fps-cap-v1",
                     "presence-fps",
                 ),
+                (
+                    ADB_FRAMEWORK_BOOT_INSTALLED_REMOTE,
+                    "adb-framework",
+                ),
             ):
                 if self.adb_run(
                     ["shell", "test", "-f", path], timeout=5
@@ -5164,6 +5300,7 @@ class PortalProvisioner:
                 self.uid1000_path("camera-led-enabled"),
                 self.uid1000_path("presence-fps"),
                 self.uid1000_path("wireless-adb-enabled"),
+                self.uid1000_path("adb-framework-enabled"),
                 self.uid1000_path(SYSTEM_THEME_CONTROL_MARKER),
             )
             if self.adb_run(
@@ -6122,6 +6259,22 @@ class PortalProvisioner:
             )
         if self.disable_adb_auth_timeout or self.restore_adb_auth_timeout:
             self.verify_adb_auth_timeout()
+        if (
+            self.disable_adb_auth_timeout
+            or self.remove_meta_accounts
+            or self.adb_framework_boot_persistence_requested()
+            or self.adb_framework_boot_configured
+        ):
+            wait_seconds = (
+                45
+                if (
+                    self.adb_framework_boot_persistence_requested()
+                    or self.adb_framework_boot_configured
+                )
+                and self.target
+                else 0
+            )
+            self.verify_adb_framework_enabled(wait_seconds=wait_seconds)
         if self.audio:
             self.verify_watchdog()
         if self.restore_audio:
@@ -6292,15 +6445,15 @@ class PortalProvisioner:
         ):
             raise ProvisionError("camera-light UID-1000 configuration remains")
         if self.target and self.target.uid1000_embedded_helper:
-            retained = self.adb_run(
-                [
-                    "shell",
-                    "test",
-                    "-f",
+            retained = any(
+                self.adb_run(
+                    ["shell", "test", "-f", path], timeout=5
+                ).returncode == 0
+                for path in (
                     "/data/local/tmp/portal-presence-backup/fps-cap-v1",
-                ],
-                timeout=5,
-            ).returncode == 0
+                    ADB_FRAMEWORK_BOOT_INSTALLED_REMOTE,
+                )
+            )
             helper_present = retained
         else:
             retained = any(
@@ -6309,6 +6462,7 @@ class PortalProvisioner:
                 for path in (
                     self.uid1000_path("presence-fps"),
                     self.uid1000_path("wireless-adb-enabled"),
+                    self.uid1000_path("adb-framework-enabled"),
                     self.uid1000_path(SYSTEM_THEME_CONTROL_MARKER),
                 )
             )
@@ -6361,6 +6515,17 @@ class PortalProvisioner:
                 f"first_boot={first_boot}\nsecond_boot={second_boot}\n",
                 WIRELESS_ADB_INSTALLED_REMOTE,
             )
+        if self.adb_framework_boot_install_requested():
+            self.push_text_atomic(
+                f"target={self.target.key if self.target else 'unknown'}\n"
+                f"first_boot={first_boot}\nsecond_boot={second_boot}\n",
+                ADB_FRAMEWORK_BOOT_INSTALLED_REMOTE,
+            )
+            self.adb_framework_boot_configured = True
+            print(
+                "ADB_FRAMEWORK_BOOT_OK persistence=uid1000 "
+                "adb_enabled=1"
+            )
         self.write_state("complete", first_boot, second_boot)
         print(
             f"PROVISION_OK first_boot={first_boot} second_boot={second_boot} "
@@ -6390,6 +6555,9 @@ class PortalProvisioner:
                 self.create_backup_bundle(self.backup_path)
             return
         self.verify_target()
+        self.adb_framework_boot_configured = (
+            self.adb_framework_boot_preflight()
+        )
         if self.system_theme_control is not None:
             self.system_theme_control_already_configured = (
                 self.system_theme_control_preflight()
@@ -6475,7 +6643,9 @@ class PortalProvisioner:
                 check=True,
             ).stdout.strip()
         self.persist_wireless_adb = (
-            self.privileged_requested() and persistent_port != "5555"
+            not self.adb_framework_only
+            and self.privileged_requested()
+            and persistent_port != "5555"
         )
         if self.persist_wireless_adb:
             self.disable_adb_auth_timeout = True
@@ -6493,6 +6663,7 @@ class PortalProvisioner:
             and self.target
             and self.target.audio_installer_credentials
             and not self.wireless_adb_only
+            and not self.adb_framework_only
         ):
             phase_logs = self.log_dir / "wireless-adb-bootstrap"
             phase_logs.mkdir(parents=True, exist_ok=True)
@@ -6526,6 +6697,35 @@ class PortalProvisioner:
                 f"property={persistent_property}",
                 flush=True,
             )
+        if (
+            self.adb_framework_boot_install_requested()
+            and self.target
+            and self.target.uid1000_installer_credentials
+            and not self.adb_framework_only
+        ):
+            phase_logs = self.log_dir / "adb-framework-bootstrap"
+            phase_logs.mkdir(parents=True, exist_ok=True)
+            print(
+                "ADB_FRAMEWORK_BOOTSTRAP_PHASE action=install "
+                "reason=installer-credential",
+                flush=True,
+            )
+            PortalProvisioner(
+                self.serial,
+                self.attempts,
+                phase_logs,
+                skip_build=self.skip_build,
+                adb_framework_only=True,
+            ).provision()
+            self.connect(wait_seconds=30)
+            self.verify_target()
+            self.adb_framework_boot_configured = (
+                self.adb_framework_boot_preflight()
+            )
+            if not self.adb_framework_boot_configured:
+                raise ProvisionError(
+                    "the dedicated ADB framework boot bootstrap did not verify"
+                )
         self.restore_existing_kiosk_home_before_bootstraps()
         self.audio_already_configured = (
             self.audio_preflight() if self.audio else False
@@ -6767,6 +6967,7 @@ class PortalProvisioner:
         if (
             already_meta_clean
             and not self.persist_wireless_adb
+            and not self.adb_framework_boot_install_requested()
             and self.requested_actions() == {"remove_meta_accounts": True}
         ):
             if resumed_pending:
@@ -6987,6 +7188,7 @@ class PortalProvisioner:
 
         privileged_action = (
             self.persist_wireless_adb
+            or self.adb_framework_boot_install_requested()
             or (self.audio and not self.audio_already_configured)
             or self.restore_audio
             or (self.disable_updates and not self.ota_already_configured)

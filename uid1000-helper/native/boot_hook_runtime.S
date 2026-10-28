@@ -41,7 +41,8 @@ portal_uid1000_boot_hook:
     // The installer replaces this with a branch to the receiver + 4.
     .word   0x14000000
 
-    // The installer replaces this word with bit 8=camera and bits 0-7=FPS.
+    // The installer replaces this word with bit 9=ADB framework,
+    // bit 8=camera, and bits 0-7=FPS.
 config_word:
     .word   0x50434647
 
@@ -50,7 +51,7 @@ child:
     // required for ICU and the runtime to initialize. The installer replaces
     // the two padded path placeholders with files from the small runtime APK;
     // apk_data_file is executable by the stock system_app policy.
-    sub     sp, sp, #112
+    sub     sp, sp, #128
     adr     x5, app_process_name
     str     x5, [sp, #0]
     adr     x5, app_process_root
@@ -77,22 +78,26 @@ no_camera:
     add     x5, x5, x23
     str     x5, [x6], #8
 no_fps:
+    tbz     w22, #9, no_adb_framework
+    adr     x5, adb_framework_option
+    str     x5, [x6], #8
+no_adb_framework:
     str     xzr, [x6]
 
     adr     x5, classpath_environment
-    str     x5, [sp, #64]
-    adr     x5, android_root_environment
-    str     x5, [sp, #72]
-    adr     x5, android_data_environment
     str     x5, [sp, #80]
-    adr     x5, android_storage_environment
+    adr     x5, android_root_environment
     str     x5, [sp, #88]
-    str     xzr, [sp, #96]
+    adr     x5, android_data_environment
+    str     x5, [sp, #96]
+    adr     x5, android_storage_environment
+    str     x5, [sp, #104]
+    str     xzr, [sp, #112]
 
     // execve("/system/bin/app_process64", argv, envp)
     adr     x0, app_process_path
     mov     x1, sp
-    add     x2, sp, #64
+    add     x2, sp, #80
     mov     x8, #221
     svc     #0
 
@@ -126,6 +131,8 @@ camera_option:
     .asciz  "--camera"
 fps_option:
     .asciz  "--fps"
+adb_framework_option:
+    .asciz  "--adb-framework"
 fps_values:
     .ascii  "1\0\0" "2\0\0" "3\0\0" "4\0\0" "5\0\0"
     .ascii  "6\0\0" "7\0\0" "8\0\0" "9\0\0" "10\0"

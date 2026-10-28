@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from provision_portal import (  # noqa: E402
     ADB_AUTH_TIMEOUT_BACKUP_REMOTE,
+    ADB_ENABLED_SETTING,
     KIOSK_RELEASE_DOWNLOAD_PREFIX,
     REMOTE_WIPE_COMPONENTS,
     PortalProvisioner,
@@ -81,6 +82,51 @@ class PersistentWirelessAdbCliTest(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit):
                 parse_args()
+
+    def test_every_target_installs_adb_framework_boot_enforcement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            for target in TARGETS:
+                with self.subTest(target=target.key):
+                    provisioner = PortalProvisioner(
+                        "192.0.2.1:5555",
+                        1,
+                        pathlib.Path(temporary),
+                        persistent_wireless_adb=True,
+                    )
+                    provisioner.target = target
+                    self.assertTrue(
+                        provisioner.adb_framework_boot_install_requested()
+                    )
+                    self.assertTrue(provisioner.needs_uid1000_payload())
+                    provisioner.adb_framework_boot_configured = True
+                    self.assertFalse(
+                        provisioner.adb_framework_boot_install_requested()
+                    )
+                    self.assertFalse(provisioner.needs_uid1000_payload())
+
+    def test_android9_internal_bootstrap_keeps_wireless_and_uid1000_phases_split(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            wireless = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                pathlib.Path(temporary),
+                wireless_adb_only=True,
+            )
+            framework = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                pathlib.Path(temporary),
+                adb_framework_only=True,
+            )
+            self.assertFalse(
+                wireless.adb_framework_boot_persistence_requested()
+            )
+            self.assertTrue(
+                framework.adb_framework_boot_persistence_requested()
+            )
+            self.assertTrue(framework.privileged_requested())
 
 
 class SystemThemeControlCliTest(unittest.TestCase):
@@ -339,9 +385,17 @@ class AdbAuthorizationTimeoutCliTest(unittest.TestCase):
                 {"disable_adb_auth_timeout": True},
             )
             self.assertFalse(provisioner.privileged_requested())
+            provisioner.target = TARGETS[0]
+            self.assertFalse(
+                provisioner.adb_framework_boot_persistence_requested()
+            )
+            self.assertFalse(provisioner.needs_uid1000_payload())
 
     def test_disable_and_restore_preserve_an_absent_original_setting(self) -> None:
-        current = {"value": "null"}
+        current = {
+            ADB_ENABLED_SETTING: "0",
+            "adb_allowed_connection_time": "null",
+        }
         saved: list[str] = []
 
         def adb_run(
@@ -354,16 +408,14 @@ class AdbAuthorizationTimeoutCliTest(unittest.TestCase):
                 if not saved:
                     return subprocess.CompletedProcess(arguments, 1, "")
                 return subprocess.CompletedProcess(arguments, 0, saved[0])
-            if arguments[:5] == [
-                "shell", "settings", "get", "global", "adb_allowed_connection_time"
-            ]:
+            if arguments[1:4] == ["settings", "get", "global"]:
                 return subprocess.CompletedProcess(
-                    arguments, 0, current["value"] + "\n"
+                    arguments, 0, current[arguments[4]] + "\n"
                 )
             if arguments[1:4] == ["settings", "put", "global"]:
-                current["value"] = arguments[-1]
+                current[arguments[4]] = arguments[-1]
             elif arguments[1:4] == ["settings", "delete", "global"]:
-                current["value"] = "null"
+                current[arguments[4]] = "null"
             return subprocess.CompletedProcess(arguments, 0, "")
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -385,12 +437,14 @@ class AdbAuthorizationTimeoutCliTest(unittest.TestCase):
                 ),
             ):
                 provisioner.disable_adb_authorization_timeout()
-                self.assertEqual(current["value"], "0")
+                self.assertEqual(current[ADB_ENABLED_SETTING], "1")
+                self.assertEqual(current["adb_allowed_connection_time"], "0")
                 provisioner.disable_adb_auth_timeout = False
                 provisioner.restore_adb_auth_timeout = True
                 provisioner.restore_adb_authorization_timeout()
 
-        self.assertEqual(current["value"], "null")
+        self.assertEqual(current[ADB_ENABLED_SETTING], "1")
+        self.assertEqual(current["adb_allowed_connection_time"], "null")
 
     def test_kiosk_profile_includes_non_expiring_adb_authorization(self) -> None:
         with mock.patch.object(
@@ -401,6 +455,113 @@ class AdbAuthorizationTimeoutCliTest(unittest.TestCase):
             arguments = parse_args()
 
         self.assertTrue(arguments.disable_adb_auth_timeout)
+
+    def test_privileged_timeout_action_installs_boot_enforcement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            for target in TARGETS:
+                with self.subTest(target=target.key):
+                    provisioner = PortalProvisioner(
+                        "192.0.2.1:5555",
+                        1,
+                        pathlib.Path(temporary),
+                        audio=True,
+                        disable_adb_auth_timeout=True,
+                    )
+                    provisioner.target = target
+                    self.assertTrue(
+                        provisioner.adb_framework_boot_persistence_requested()
+                    )
+                    self.assertTrue(provisioner.needs_uid1000_payload())
+
+    def test_wireless_adb_waits_for_framework_boot_recovery_on_all_targets(
+        self,
+    ) -> None:
+        target = next(
+            target
+            for target in TARGETS
+            if target.key == "portal-go-terry-5051355900018050"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            provisioner = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                pathlib.Path(temporary),
+                persistent_wireless_adb=True,
+            )
+            provisioner.target = target
+            provisioner.persist_wireless_adb = True
+            with (
+                mock.patch.object(
+                    provisioner,
+                    "adb_run",
+                    return_value=subprocess.CompletedProcess([], 0, "5555\n"),
+                ),
+                mock.patch.object(provisioner, "verify_adb_auth_timeout"),
+                mock.patch.object(
+                    provisioner, "verify_adb_framework_enabled"
+                ) as verify_framework,
+            ):
+                provisioner.verify_requested_state()
+
+        verify_framework.assert_called_once_with(wait_seconds=45)
+
+    def test_meta_account_preflight_enables_new_host_prompts_first(self) -> None:
+        order: list[str] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            provisioner = PortalProvisioner(
+                "192.0.2.1:5555",
+                1,
+                pathlib.Path(temporary),
+                remove_meta_accounts=True,
+            )
+            with (
+                mock.patch.object(
+                    provisioner,
+                    "ensure_adb_framework_enabled",
+                    side_effect=lambda: order.append("adb-framework"),
+                ) as ensure,
+                mock.patch.object(
+                    provisioner,
+                    "meta_accounts",
+                    side_effect=lambda: order.append("accounts") or [],
+                ),
+                mock.patch.object(
+                    provisioner,
+                    "disabled_meta_authenticators",
+                    return_value=set(),
+                ),
+                mock.patch.object(
+                    provisioner,
+                    "adb_run",
+                    return_value=subprocess.CompletedProcess(
+                        [], 0, "# portal-meta-accounts-before-v1\n"
+                    ),
+                ),
+            ):
+                provisioner.meta_accounts_preflight()
+
+        ensure.assert_called_once_with()
+        self.assertEqual(order[:2], ["adb-framework", "accounts"])
+
+    def test_framework_enable_must_persist(self) -> None:
+        def adb_run(
+            arguments: list[str],
+            timeout: float | None = None,
+            check: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            del timeout, check
+            output = "0\n" if arguments[1:4] == ["settings", "get", "global"] else ""
+            return subprocess.CompletedProcess(arguments, 0, output)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            provisioner = PortalProvisioner(
+                "192.0.2.1:5555", 1, pathlib.Path(temporary)
+            )
+            with mock.patch.object(provisioner, "adb_run", side_effect=adb_run):
+                with self.assertRaisesRegex(
+                    ProvisionError, "authorization prompts cannot appear"
+                ):
+                    provisioner.ensure_adb_framework_enabled()
 
 
 class KioskHomeResumeTest(unittest.TestCase):

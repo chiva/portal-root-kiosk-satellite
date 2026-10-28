@@ -265,8 +265,17 @@ python3 tools/provision_portal.py \
 Android normally expires approved ADB host keys after a period of inactivity.
 This sets `adb_allowed_connection_time` to `0`, which tells Android to retain
 previously approved keys indefinitely. A new computer must still be approved on
-the Portal; this does not disable ADB authentication. The provisioner saves the
-original setting before changing it.
+the Portal; this does not disable ADB authentication. The provisioner also
+ensures Android's `adb_enabled` framework setting is on so the authorization
+prompt can appear for that new computer. It saves the original connection-time
+setting before changing it.
+
+On every supported Portal target, privileged provisioning that removes the Meta
+accounts or selects non-expiring ADB authorization installs UID-1000 boot
+enforcement that restores `adb_enabled=1` if firmware changes it. This includes
+`--persistent-wireless-adb` and `--profile kiosk`. Portal 10-inch and Portal
+Mini Omni firmware also use the same helper to recover adbd itself after Meta's
+late boot rules stop it.
 
 This standalone action uses ordinary ADB authority and does not run the root
 exploit or reboot the Portal.
@@ -898,8 +907,10 @@ focus.
 
 Meta's production Debug page also builds its ADB row from the signed-in owner
 profile. After the local Meta accounts are removed, that page may appear empty
-even though ADB remains enabled and wireless ADB remains available. To open the
-firmware's full Debug page from an authorized ADB computer, run:
+even though ADB remains enabled and wireless ADB remains available. Before
+removing the accounts, the provisioner verifies Android's ADB framework is
+enabled so future host keys can still produce the normal confirmation dialog.
+To open the firmware's full Debug page from an authorized ADB computer, run:
 
 ```sh
 adb -s "$PORTAL_IP:5555" shell am start \
