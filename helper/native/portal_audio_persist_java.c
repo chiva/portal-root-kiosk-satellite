@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/system_properties.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -15,6 +17,12 @@
 #define AUDIO_CTL_JAR \
   "/data/user/0/com.facebook.portal.aiservice/lib-compressed/" \
   "portal-audio-ctl.jar"
+
+static int uses_mha_backend(void) {
+  char device[PROP_VALUE_MAX] = {0};
+  return __system_property_get("ro.product.device", device) > 0 &&
+      strcmp(device, "omni") == 0;
+}
 
 static int run_audio_ctl(void) {
   pid_t pid = fork();
@@ -49,14 +57,19 @@ static void *watchdog_main(void *unused) {
   static const unsigned int healthy_delays[] = {2, 3, 5, 10, 15, 30, 60};
   unsigned int healthy_checks = 0;
   unsigned int failures = 0;
+  int mha = uses_mha_backend();
   sleep(2);
   for (;;) {
     int ok = run_audio_ctl();
     if (ok) {
       if (failures)
         LOGI("audio processing restored after %u failures backend=java", failures);
-      if (healthy_checks == 0)
-        LOGI("audio processing verified aec=0 ns=0 backend=java");
+      if (healthy_checks == 0) {
+        if (mha)
+          LOGI("mha audio processing verified aec=0 ns=0 backend=java");
+        else
+          LOGI("audio processing verified aec=0 ns=0 backend=java");
+      }
       failures = 0;
       unsigned int index = healthy_checks;
       if (index >= sizeof(healthy_delays) / sizeof(healthy_delays[0]))
@@ -79,7 +92,8 @@ __attribute__((constructor)) static void portal_audio_start(void) {
   int error = pthread_create(&thread, NULL, watchdog_main, NULL);
   if (error == 0) {
     pthread_detach(thread);
-    LOGI("persistent audio watchdog started backend=java");
+    LOGI("persistent audio watchdog started backend=java dsp=%s",
+         uses_mha_backend() ? "mha" : "voice-param");
   } else {
     LOGE("watchdog pthread_create failed error=%d backend=java", error);
   }

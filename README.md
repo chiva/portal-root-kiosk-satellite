@@ -326,17 +326,33 @@ python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --audio
 ```
 
-The Portal's microphone array passes through a DBMD7/STAX voice DSP before
-Android receives it. This action installs a native watchdog inside Meta's
-AIService and keeps these private DSP parameters at zero:
+The Portal's microphone array passes through firmware-owned voice processing
+before Android receives it. This action installs a native watchdog inside
+Meta's AIService and selects the controls used by each hardware backend.
+
+Portal Go and the other STAX/DBMD builds keep these private DSP parameters at
+zero:
 
 - `AEC_ENABLE` (`3001`)
 - `NS_MODE` (`4001`), including residual-echo suppression
 
+Portal Mini and second-generation 10-inch Portal (`omni`) use the MH Acoustics
+MHA backend instead. On those devices the provisioner keeps the stereo capture
+engine active and patches the firmware tuning profiles to disable
+double-talk echo suppression, residual-echo suppression, and noise suppression
+in both post-processing paths. It validates the exact shipped blob before
+writing, preserves a byte-for-byte stock backup, and restores the vendor block
+device's read-only state afterward. The restore action puts that stock blob
+back.
+
 The change is system-wide, so every Android application receives audio without
-those two processing stages. The watchdog reapplies the values after AIService
-starts and repairs later firmware-side changes. The provisioner confirms both
-readbacks on two boots. A later `--audio` run first checks the persistent
+those processing stages. On STAX devices, the watchdog reapplies the values
+after AIService starts and repairs later firmware-side changes. On MHA devices,
+it reads the live hardware values and, if necessary, forces a temporary profile
+transition so the tuning manager reloads the patched regular-capture profile.
+It then verifies all nine suppression controls directly. The provisioner
+requires real DSP readbacks on two boots. A later
+`--audio` run first checks the persistent
 installation marker and the running watchdog. If both are healthy, an
 audio-only command exits successfully without rebuilding, exploiting, or
 rebooting; when combined with other actions, only the audio installation is

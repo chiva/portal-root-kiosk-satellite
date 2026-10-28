@@ -34,6 +34,7 @@ from meta_debloat_components import (
     DEBLOAT_COMPONENT_NAMES,
 )
 from portal_targets import PortalTarget, find_target
+from mha_tuning import OMNI_STOCK_SHA256, patch_omni_tuning, sha256
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -41,6 +42,8 @@ PROJECT_URL = "https://github.com/jxlarrea/portal-root-kiosk-satellite"
 ANDROID_NDK_VERSION = "28.2.13676358"
 ANDROID_BUILD_TOOLS_VERSION = "37.0.0"
 ANDROID_PLATFORM_VERSION = "android-36"
+MHA_AUDIO_VERIFIED_LOG = "mha audio processing verified aec=0 ns=0"
+VOICE_AUDIO_VERIFIED_LOG = "audio processing verified aec=0 ns=0"
 PROVISIONER_BANNER = rf"""
 +----------------------------------------------------------------+
 |                                                                |
@@ -57,6 +60,12 @@ PRELOAD_REMOTE = "/data/local/tmp/preload-portal.so"
 HELPER_REMOTE = "/data/local/tmp/libportal_audio_persist.so"
 AUDIO_CTL_LOCAL = ROOT / "exploit/build/portal-audio-ctl.jar"
 AUDIO_CTL_REMOTE = "/data/local/tmp/portal-audio-ctl.jar"
+MHA_TUNING_DEVICE = "/vendor/etc/audio/omni/mha_tuning_blobs.tub"
+MHA_TUNING_STOCK_REMOTE = "/data/local/tmp/portal-mha-tuning-stock.tub"
+MHA_TUNING_PATCHED_REMOTE = "/data/local/tmp/portal-mha-tuning-disabled.tub"
+MHA_TUNING_BACKUP_REMOTE = (
+    "/data/local/tmp/portal-audio-backup/mha_tuning_blobs.stock-v1.tub"
+)
 ACCOUNT_CTL_LOCAL = ROOT / "exploit/build/portal-account-ctl.jar"
 ACCOUNT_CTL_REMOTE = "/data/local/tmp/portal-account-ctl.jar"
 COMPONENT_CTL_LOCAL = ROOT / "exploit/build/portal-component-ctl.jar"
@@ -291,6 +300,8 @@ class PortalProvisioner:
         self.log_dir = log_dir
         self.audio = audio
         self.audio_already_configured = False
+        self.mha_tuning_stock_local: pathlib.Path | None = None
+        self.mha_tuning_patched_local: pathlib.Path | None = None
         self.restore_audio = restore_audio
         self.install_kiosk_satellite = install_kiosk_satellite
         self.kiosk_apk: pathlib.Path | None = None
@@ -760,6 +771,11 @@ class PortalProvisioner:
     def stage(self) -> None:
         if self.target is None:
             raise ProvisionError("target must be selected before staging")
+        if self.target.device == "omni" and (
+            (self.audio and not self.audio_already_configured)
+            or self.restore_audio
+        ):
+            self.prepare_mha_tuning_payloads()
         files = [(self.target.preload_path(ROOT), PRELOAD_REMOTE)]
         if self.audio and not self.audio_already_configured:
             helper = (
@@ -773,6 +789,13 @@ class PortalProvisioner:
             or self.restore_audio
         ):
             files.append((AUDIO_CTL_LOCAL, AUDIO_CTL_REMOTE))
+        if self.mha_tuning_stock_local and self.mha_tuning_patched_local:
+            files.extend(
+                (
+                    (self.mha_tuning_stock_local, MHA_TUNING_STOCK_REMOTE),
+                    (self.mha_tuning_patched_local, MHA_TUNING_PATCHED_REMOTE),
+                )
+            )
         if self.remove_meta_accounts:
             files.append((ACCOUNT_CTL_LOCAL, ACCOUNT_CTL_REMOTE))
         if self.needs_component_ctl():
@@ -794,7 +817,11 @@ class PortalProvisioner:
             self.adb_run(["push", str(local), remote], timeout=30, check=True)
             mode = (
                 "0644"
-                if remote == SHIZUKU_KEY_REMOTE
+                if remote in (
+                    SHIZUKU_KEY_REMOTE,
+                    MHA_TUNING_STOCK_REMOTE,
+                    MHA_TUNING_PATCHED_REMOTE,
+                )
                 else "0755"
             )
             self.adb_run(["shell", "chmod", mode, remote], timeout=5, check=True)
@@ -803,6 +830,8 @@ class PortalProvisioner:
             staged += f" helper={HELPER_REMOTE}"
         if AUDIO_CTL_REMOTE in {remote for _, remote in files}:
             staged += f" audio_ctl={AUDIO_CTL_REMOTE}"
+        if MHA_TUNING_PATCHED_REMOTE in {remote for _, remote in files}:
+            staged += f" mha_tuning={MHA_TUNING_PATCHED_REMOTE}"
         if self.remove_meta_accounts:
             staged += f" account_ctl={ACCOUNT_CTL_REMOTE}"
         if COMPONENT_CTL_REMOTE in {remote for _, remote in files}:
@@ -815,6 +844,54 @@ class PortalProvisioner:
                 f" uid1000_hook={CAMERA_LIGHT_HOOK_REMOTE}"
             )
         print(f"STAGED {staged}")
+
+    def pull_file(self, remote: str, local: pathlib.Path) -> bytes:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        result = self.adb_run(
+            ["pull", remote, str(local)], timeout=30
+        )
+        if result.returncode != 0 or not local.is_file():
+            raise ProvisionError(
+                f"could not pull required device file {remote}: "
+                f"{result.stdout.strip()}"
+            )
+        return local.read_bytes()
+
+    def prepare_mha_tuning_payloads(self) -> None:
+        current_path = self.log_dir / "mha_tuning_blobs.device.tub"
+        stock_path = self.log_dir / "mha_tuning_blobs.stock.tub"
+        patched_path = self.log_dir / "mha_tuning_blobs.disabled.tub"
+        current = self.pull_file(MHA_TUNING_DEVICE, current_path)
+        current_hash = sha256(current)
+
+        if current_hash == OMNI_STOCK_SHA256:
+            stock = current
+        else:
+            backup_path = self.log_dir / "mha_tuning_blobs.backup.tub"
+            stock = self.pull_file(MHA_TUNING_BACKUP_REMOTE, backup_path)
+            if sha256(stock) != OMNI_STOCK_SHA256:
+                raise ProvisionError(
+                    "Omni MHA stock backup has an unexpected SHA-256; "
+                    "refusing to write /vendor"
+                )
+        patched, changes = patch_omni_tuning(stock)
+        patched_hash = sha256(patched)
+        if current_hash not in (OMNI_STOCK_SHA256, patched_hash):
+            raise ProvisionError(
+                "Omni MHA tuning blob has an unknown SHA-256; refusing to "
+                f"write /vendor: {current_hash}"
+            )
+        stock_path.write_bytes(stock)
+        patched_path.write_bytes(patched)
+        self.mha_tuning_stock_local = stock_path
+        self.mha_tuning_patched_local = patched_path
+        print(
+            "MHA_TUNING_PREPARED "
+            f"current={current_hash} stock={OMNI_STOCK_SHA256} "
+            f"patched={patched_hash} parameters={len(changes)} "
+            f"action={'restore' if self.restore_audio else 'disable'}",
+            flush=True,
+        )
 
     def requested_actions(self) -> dict[str, object]:
         actions: dict[str, object] = {}
@@ -1065,6 +1142,10 @@ class PortalProvisioner:
             "PortalAudioPersist:*",
             timeout=10,
         )
+        audio_disabled_observed = self.audio_processing_disabled_observed(
+            audio_logs, target
+        )
+        mha_audio_observed = MHA_AUDIO_VERIFIED_LOG in audio_logs
         camera_light_logs = shell(
             "logcat",
             "-d",
@@ -1331,7 +1412,7 @@ class PortalProvisioner:
                     or (
                         target is not None
                         and target.audio_installer_credentials
-                        and "audio processing verified aec=0 ns=0" in audio_logs
+                        and audio_disabled_observed
                     )
                     else "restored"
                     if audio_restored
@@ -1342,10 +1423,16 @@ class PortalProvisioner:
                 "installed_marker": audio_installed,
                 "watchdog_observed": (
                     "persistent audio watchdog started" in audio_logs
-                    or "audio processing verified aec=0 ns=0" in audio_logs
+                    or audio_disabled_observed
                 ),
-                "processing_zero_observed": (
-                    "audio processing verified aec=0 ns=0" in audio_logs
+                "processing_zero_observed": audio_disabled_observed,
+                "mha_processing_verified": mha_audio_observed,
+                "backend": (
+                    "mha"
+                    if target is not None and target.device == "omni"
+                    else "voice-param"
+                    if target is not None
+                    else None
                 ),
                 "restored_marker": audio_restored,
             },
@@ -4193,6 +4280,16 @@ class PortalProvisioner:
                         "GHOSTLOCK_AUDIO_PERSIST_JAR": AUDIO_CTL_REMOTE,
                     }
                 )
+            if self.target.device == "omni":
+                environment.update(
+                    {
+                        "GHOSTLOCK_MHA_TUNING_INSTALL": "1",
+                        "GHOSTLOCK_MHA_TUNING_STOCK": MHA_TUNING_STOCK_REMOTE,
+                        "GHOSTLOCK_MHA_TUNING_PATCHED": (
+                            MHA_TUNING_PATCHED_REMOTE
+                        ),
+                    }
+                )
         if self.restore_audio:
             environment.update(
                 {
@@ -4205,6 +4302,16 @@ class PortalProvisioner:
                     {
                         "GHOSTLOCK_AUDIO_CTL_JAVA_FALLBACK": "1",
                         "GHOSTLOCK_AUDIO_CTL_JAR": AUDIO_CTL_REMOTE,
+                    }
+                )
+            if self.target.device == "omni":
+                environment.update(
+                    {
+                        "GHOSTLOCK_MHA_TUNING_RESTORE": "1",
+                        "GHOSTLOCK_MHA_TUNING_STOCK": MHA_TUNING_STOCK_REMOTE,
+                        "GHOSTLOCK_MHA_TUNING_PATCHED": (
+                            MHA_TUNING_PATCHED_REMOTE
+                        ),
                     }
                 )
         private_audio_action = (
@@ -4568,6 +4675,11 @@ class PortalProvisioner:
                     "audio_persistence": ("audio persistence install", True),
                 }
             )
+            if self.target.device == "omni":
+                expected_markers["mha_tuning"] = (
+                    "MHA tuning install",
+                    True,
+                )
         if self.restore_audio:
             audio_marker = (
                 "PORTAL_AUDIO_JAVA_OK mode=firmware-defaults"
@@ -4580,6 +4692,11 @@ class PortalProvisioner:
                     "audio_restore": ("audio persistence restore", True),
                 }
             )
+            if self.target.device == "omni":
+                expected_markers["mha_tuning_restore"] = (
+                    "MHA tuning restore",
+                    True,
+                )
         if self.device_owner and not self.device_owner_already_configured:
             expected_markers["device_owner"] = ("kiosk device owner install", True)
         if self.disable_updates and not self.ota_already_configured:
@@ -4834,6 +4951,21 @@ class PortalProvisioner:
                 process.wait(timeout=3)
         return success
 
+    @staticmethod
+    def audio_processing_disabled_observed(
+        logs: str, target: PortalTarget | None
+    ) -> bool:
+        if target is not None and target.device == "omni":
+            # Omni's MHA backend rejects VoiceParam 3001/4001.  In
+            # particular, never let an old Java watchdog's synthetic 0.0
+            # readbacks satisfy the health check on this target.
+            return MHA_AUDIO_VERIFIED_LOG in logs
+        if VOICE_AUDIO_VERIFIED_LOG in logs:
+            return True
+        aec = re.search(r"param=3001 .*after=0 .*ok=1", logs)
+        ns = re.search(r"param=4001 .*after=0 .*ok=1", logs)
+        return bool(aec and ns)
+
     def verify_watchdog(self, wait_seconds: int = 25) -> str:
         deadline = time.monotonic() + wait_seconds
         last_log = ""
@@ -4844,10 +4976,10 @@ class PortalProvisioner:
             )
             last_log = result.stdout
             started = "persistent audio watchdog started" in last_log
-            verified = "audio processing verified aec=0 ns=0" in last_log
-            aec = re.search(r"param=3001 .*after=0 .*ok=1", last_log)
-            ns = re.search(r"param=4001 .*after=0 .*ok=1", last_log)
-            if started and (verified or (aec and ns)):
+            disabled = self.audio_processing_disabled_observed(
+                last_log, self.target
+            )
+            if started and disabled:
                 pid = self.adb_run(
                     ["shell", "pidof", "com.facebook.portal.aiservice"],
                     timeout=5,

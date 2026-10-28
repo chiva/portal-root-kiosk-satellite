@@ -18,6 +18,7 @@ from provision_portal import (  # noqa: E402
     ADB_AUTH_TIMEOUT_BACKUP_REMOTE,
     ADB_ENABLED_SETTING,
     KIOSK_RELEASE_DOWNLOAD_PREFIX,
+    MHA_AUDIO_VERIFIED_LOG,
     REMOTE_WIPE_COMPONENTS,
     PortalProvisioner,
     ProvisionError,
@@ -30,6 +31,35 @@ from meta_debloat_components import (  # noqa: E402
     PORTAL_PLUS_ALOHA_SAFE_COMPONENT_NAMES,
 )
 from portal_targets import TARGETS  # noqa: E402
+
+
+class AudioWatchdogVerificationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.omni = next(target for target in TARGETS if target.device == "omni")
+        self.terry = next(target for target in TARGETS if target.device == "terry")
+
+    def test_omni_rejects_legacy_voice_parameter_success_log(self) -> None:
+        legacy = "audio processing verified aec=0 ns=0 backend=java"
+        self.assertFalse(
+            PortalProvisioner.audio_processing_disabled_observed(
+                legacy, self.omni
+            )
+        )
+
+    def test_omni_accepts_only_the_mha_verification_log(self) -> None:
+        self.assertTrue(
+            PortalProvisioner.audio_processing_disabled_observed(
+                MHA_AUDIO_VERIFIED_LOG, self.omni
+            )
+        )
+
+    def test_non_omni_keeps_voice_parameter_verification(self) -> None:
+        legacy = "audio processing verified aec=0 ns=0 backend=java"
+        self.assertTrue(
+            PortalProvisioner.audio_processing_disabled_observed(
+                legacy, self.terry
+            )
+        )
 
 
 class PersistentWirelessAdbCliTest(unittest.TestCase):
