@@ -119,6 +119,119 @@ adb shell getprop ro.build.fingerprint
 adb shell uname -a
 ```
 
+## Run with Docker
+
+If you would rather not install the Android toolchain on your computer, build
+the provided image instead. It is a self-contained Linux x86_64 image that
+carries the JDK, Android SDK Platform 36, Build Tools and NDK plus this
+repository, and runs `tools/provision_portal.py` as its entrypoint.
+
+The image is `linux/amd64`, because the Android NDK ships only an x86_64 host
+toolchain. It is native on an x86_64 host; on an arm64 host it runs under
+emulation, which works but is slower.
+
+Build the image once:
+
+```sh
+docker build -t portal-provisioner .
+```
+
+How you run it depends on how the container reaches the Portal. Pick the
+pattern that matches your host and the step you are running.
+
+### Option A: wireless ADB (Linux host)
+
+Best for steps that do not require a USB transport — status, dry-runs, and
+provisioning phases that work once wireless ADB is enabled. Do the one-time
+USB bootstrap in [Prepare the Portal](#2-prepare-the-portal) and [Connect to
+the Portal](#3-connect-to-the-portal) from the host first.
+
+```sh
+docker run --rm -it \
+  --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --profile kiosk
+```
+
+`--network host` lets the container's `adb` reach the Portal on your LAN, and
+the volume keeps the adb authorization keys and the generated debug keystore
+between runs so the Portal stays authorized.
+
+Note: `--network host` only exposes the LAN on a Linux host. Container
+runtimes that run Docker inside a VM place the container behind that VM's
+network — it reaches the internet but not devices on your LAN. Use Option C
+there.
+
+### Option B: USB passthrough (Linux host)
+
+Required for any step that must speak USB — for example, the exploit
+injection, or reconnecting after a reboot (which clears `adb tcpip` mode).
+Only works on a Linux host: container runtimes that run Docker inside a VM do
+not expose the host's USB bus to the container.
+
+```sh
+docker run --rm -it \
+  --privileged \
+  -v /dev/bus/usb:/dev/bus/usb \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_SERIAL" --profile kiosk
+```
+
+Use the device serial reported by `adb devices` (not an `ip:port`).
+`--privileged` plus the `/dev/bus/usb` bind is required because `adb` needs to
+re-open the device across hotplug and reboot; the narrower
+`--device=/dev/bus/usb/<bus>/<dev>` form breaks when the Portal re-enumerates.
+
+### Option C: split — container builds, host installs
+
+Use this when the container cannot reach the Portal at all. This is the
+pattern for hosts where Docker runs inside a VM: the container sees neither
+your USB bus nor your LAN, but the host does. The container builds the APKs,
+JARs and `.so` artifacts; the host — which has `adb`, Python and the Portal's
+USB or wireless connection — drives the device-touching step with
+`--skip-build`.
+
+Bind-mount the repository over the container's copy so the artifacts land on
+the host filesystem under `<component>/build/`:
+
+```sh
+docker run --rm \
+  -v "$PWD":/opt/portal \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_SERIAL" --profile kiosk --dry-run
+```
+
+`--dry-run` runs the build and validates the plan without touching the
+device.
+
+Then run the installer on the host — `adb`, `python3`, `make` and `git` are
+required (the provisioner's preflight checks all four), but no JDK, Android
+SDK or NDK:
+
+```sh
+python3 tools/provision_portal.py \
+  --serial "$PORTAL_SERIAL" --profile kiosk --skip-build
+```
+
+`--skip-build` reuses the artifacts the container just produced. Re-run the
+container (or `make -C <component> clean`) whenever the source changes, since
+the host side does not check freshness.
+
+### Common
+
+Any provisioner flag can be appended after the image name; for example, print
+the full usage with:
+
+```sh
+docker run --rm portal-provisioner --help
+```
+
+The image runs as an unprivileged user and bakes in no device address or
+credentials — pass the target with `--serial` on each run.
+
 ## Step-by-step installation
 
 > [!WARNING]
@@ -201,6 +314,12 @@ provisioner checks them again before making any kernel change.
 ```sh
 python3 tools/provision_portal.py --serial "$PORTAL_IP:5555" \
   --profile kiosk
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner --serial "$PORTAL_IP:5555" \
+  --profile kiosk
 ```
 
 The `kiosk` profile installs Kiosk Satellite when needed, then configures its
@@ -235,6 +354,12 @@ selective setups, technical details and rollback commands. Features labeled
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --persistent-wireless-adb
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --persistent-wireless-adb
 ```
 
 This applies only wireless ADB persistence on TCP port 5555. It does not
@@ -259,6 +384,12 @@ On a stock Portal, continue manually enabling ADB in the Debug menu and running
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --disable-adb-auth-timeout
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --disable-adb-auth-timeout
 ```
 
@@ -286,6 +417,12 @@ saved timeout, run:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-adb-auth-timeout
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-adb-auth-timeout
 ```
 
 </details>
@@ -298,6 +435,12 @@ python3 tools/provision_portal.py \
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --install-kiosk-satellite
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --install-kiosk-satellite
 ```
 
@@ -323,6 +466,12 @@ permissions.
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --audio
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --audio
 ```
 
@@ -364,6 +513,12 @@ firmware's AEC and NS parameter defaults with:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-audio
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-audio
 ```
 
 The restore uses the original loader saved during the first installation and
@@ -378,6 +533,12 @@ refuses to replace an unrelated file.
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --kiosk-permissions
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --kiosk-permissions
 ```
 
@@ -402,6 +563,12 @@ after a data clear.
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --device-owner
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --device-owner
 ```
 
@@ -429,6 +596,12 @@ automated Device Owner removal action in the provisioner.
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --kiosk-home
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --kiosk-home
 ```
 
 This uses Kiosk Satellite's Device Owner authority to register its
@@ -447,6 +620,12 @@ and return to Android's remaining launcher resolution with:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-kiosk-home
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-kiosk-home
 ```
 
 </details>
@@ -458,6 +637,12 @@ python3 tools/provision_portal.py \
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --disable-updates
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --disable-updates
 ```
 
@@ -476,6 +661,12 @@ Restore that exact override state and re-enable both OTA packages with:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --enable-updates
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --enable-updates
 ```
 
 </details>
@@ -487,6 +678,12 @@ python3 tools/provision_portal.py \
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --block-remote-wipe
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --block-remote-wipe
 ```
 
@@ -506,6 +703,12 @@ Restore both receivers to their individually saved states with:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-remote-wipe
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-remote-wipe
 ```
 
 </details>
@@ -517,6 +720,12 @@ python3 tools/provision_portal.py \
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --debloat
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --debloat
 ```
 
@@ -886,6 +1095,12 @@ states with:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-bloat
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-bloat
 ```
 
 Both commands verify the retained camera, AIService, Kiosk Home, and WebView
@@ -900,6 +1115,12 @@ paths across two reboots.
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --remove-meta-accounts
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --remove-meta-accounts
 ```
 
@@ -945,6 +1166,12 @@ Run:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --optimize-presence
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --optimize-presence
 ```
 
 Kiosk Satellite reads AIService's `Notify people presence` log to use the
@@ -989,6 +1216,12 @@ The original settings-file state is stored under
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-presence-profile
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-presence-profile
 ```
 
 The installer and restore action use atomic file replacement, preserve the
@@ -1003,6 +1236,12 @@ app's ownership and SELinux label, and refuse to overwrite an unrelated edit.
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --allow-app-updates
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --allow-app-updates
 ```
 
@@ -1026,6 +1265,12 @@ Restore the saved Android setting and verifier-package state with:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-app-verifier
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-app-verifier
 ```
 
 </details>
@@ -1041,6 +1286,12 @@ frames per second is the tested balance for room-presence detection:
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --presence-fps-cap 2
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --presence-fps-cap 2
 ```
 
@@ -1075,6 +1326,12 @@ Remove only the cap and helper while keeping the full-scene optimization:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-presence-fps
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-presence-fps
 ```
 
 `--restore-presence-profile` also removes the cap and helper before restoring
@@ -1093,6 +1350,12 @@ network, run:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --dhcp-dns
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --dhcp-dns
 ```
 
 This disables Android's opportunistic Private DNS mode. Android then uses the
@@ -1108,6 +1371,12 @@ Alternatively, configure a specific DNS-over-TLS resolver:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --privacy-dns dns.example.net
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --privacy-dns dns.example.net
 ```
 
 Replace `dns.example.net` with the DNS-over-TLS hostname of a resolver you
@@ -1122,6 +1391,12 @@ The first DNS action saves both original Android settings. Restore them with:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --restore-privacy-dns
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --restore-privacy-dns
 ```
 
 </details>
@@ -1133,6 +1408,12 @@ python3 tools/provision_portal.py \
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --system-theme-control dark
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --system-theme-control dark
 ```
 
@@ -1180,6 +1461,12 @@ is running.
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --shizuku
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --shizuku
 ```
 
 This downloads the pinned official Shizuku release on the host computer,
@@ -1212,6 +1499,12 @@ To use a Shizuku APK you downloaded yourself, run:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --shizuku --shizuku-apk ./shizuku.apk
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --shizuku --shizuku-apk ./shizuku.apk
 ```
 
 Remove the manager, boot helper, running server, and the helper's authorized
@@ -1219,6 +1512,12 @@ ADB key with:
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --remove-shizuku
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --remove-shizuku
 ```
 
@@ -1232,6 +1531,12 @@ Print a read-only JSON report without exploiting or rebooting the Portal:
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --status
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --status
 ```
 
@@ -1248,6 +1553,12 @@ Preview an action or the full profile without changing the device:
 ```sh
 python3 tools/provision_portal.py \
   --serial "$PORTAL_IP:5555" --profile kiosk --dry-run
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
+  --serial "$PORTAL_IP:5555" --profile kiosk --dry-run
 ```
 
 The plan identifies required build outputs, host tools, exploit use, estimated
@@ -1259,6 +1570,12 @@ Create a private diagnostic and configuration archive before making changes:
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --backup ./backups
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --backup ./backups
 ```
 
@@ -1277,6 +1594,12 @@ ADB and resume the pending action set with:
 
 ```sh
 python3 tools/provision_portal.py \
+  --serial "$PORTAL_IP:5555" --recover
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner \
   --serial "$PORTAL_IP:5555" --recover
 ```
 
@@ -1332,6 +1655,11 @@ option with:
 
 ```sh
 python3 tools/provision_portal.py --help
+
+# Docker:
+docker run --rm --network host \
+  -v portal-android-home:/home/builder/.android \
+  portal-provisioner --help
 ```
 
 Each successful run verifies the requested state on two distinct boots. Read
