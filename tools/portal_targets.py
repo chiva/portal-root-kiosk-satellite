@@ -173,6 +173,11 @@ TARGETS = (
         wireless_adb_uid1000_boot=True,
         audio_java_fallback=True,
         audio_deferred_ctl=True,
+        presence_runtime_keys=(
+            "enable_cv_background_detector_v2",
+            "enable_hardware_cropping",
+            "enable_liveness_metric",
+        ),
     ),
     PortalTarget(
         key="portal-mini-omni-3051355900018050",
@@ -212,6 +217,11 @@ TARGETS = (
         wireless_adb_uid1000_boot=True,
         audio_java_fallback=True,
         audio_deferred_ctl=True,
+        presence_runtime_keys=(
+            "enable_cv_background_detector_v2",
+            "enable_hardware_cropping",
+            "enable_liveness_metric",
+        ),
     ),
     PortalTarget(
         key="portal-plus-aloha-1041515800015050",

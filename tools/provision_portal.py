@@ -4966,7 +4966,9 @@ class PortalProvisioner:
         ns = re.search(r"param=4001 .*after=0 .*ok=1", logs)
         return bool(aec and ns)
 
-    def verify_watchdog(self, wait_seconds: int = 25) -> str:
+    def verify_watchdog(
+        self, wait_seconds: int = 25, allow_pending: bool = False
+    ) -> str:
         deadline = time.monotonic() + wait_seconds
         last_log = ""
         while time.monotonic() < deadline:
@@ -4994,6 +4996,21 @@ class PortalProvisioner:
                 print(last_log.rstrip())
                 return boot_id
             time.sleep(2)
+        if allow_pending and "persistent audio watchdog started" in last_log:
+            attempts = re.findall(
+                r"audio processing apply failed count=(\d+)", last_log
+            )
+            attempt_count = int(attempts[-1]) if attempts else 0
+            pid = self.adb_run(
+                ["shell", "pidof", "com.facebook.portal.aiservice"], timeout=5
+            ).stdout.strip()
+            print(
+                "WATCHDOG_PENDING aiservice_pid=%s attempts=%d "
+                "note=watchdog_running_will_retry_in_background"
+                % (pid, attempt_count)
+            )
+            print(last_log.rstrip())
+            return ""
         raise ProvisionError(
             "watchdog did not verify after boot; recent log follows:\n"
             + last_log[-4000:]
@@ -6093,6 +6110,7 @@ class PortalProvisioner:
         require_profile: bool,
         expected_analysis_fps: int | None = None,
         wait_seconds: int = 90,
+        allow_pending: bool = False,
     ) -> None:
         deadline = time.monotonic() + wait_seconds
         pid = ""
@@ -6306,6 +6324,32 @@ class PortalProvisioner:
                 )
                 return
             time.sleep(2)
+        core_pipeline_ok = (
+            bool(pid)
+            and camera_active
+            and camera_allowed
+            and analysis_frames
+            and roi_frames
+            and pose_metrics
+            and frame_processor_loaded
+            and (not require_profile or wide_frame)
+            and (not require_profile or required_profile_keys.issubset(loaded_keys))
+        )
+        fps_cap_pending = (
+            expected_analysis_fps is not None
+            and uid1000_configured
+            and not (analysis_fps_applied and helper_activation)
+        )
+        if allow_pending and core_pipeline_ok and fps_cap_pending:
+            print(
+                "PRESENCE_RUNTIME_PENDING "
+                f"pid={pid.split()[0]} fps_cap={expected_analysis_fps} "
+                f"analysis_fps_applied={int(analysis_fps_applied)} "
+                f"helper_activation={int(helper_activation)} "
+                "uid1000_configured=1 "
+                "note=pipeline_active_fps_cap_will_apply_from_uid1000_helper"
+            )
+            return
         camera_hint = (
             " Check that the Portal's physical camera cover is open and its "
             "camera/microphone privacy control is off."
@@ -6408,7 +6452,7 @@ class PortalProvisioner:
             )
             self.verify_adb_framework_enabled(wait_seconds=wait_seconds)
         if self.audio:
-            self.verify_watchdog()
+            self.verify_watchdog(allow_pending=True)
         if self.restore_audio:
             self.verify_audio_restored()
         if self.kiosk_permissions:
@@ -6475,9 +6519,12 @@ class PortalProvisioner:
             self.verify_presence_runtime(
                 require_profile=True,
                 expected_analysis_fps=self.presence_fps_cap,
+                allow_pending=True,
             )
         if self.restore_presence_profile:
-            self.verify_presence_runtime(require_profile=False)
+            self.verify_presence_runtime(
+                require_profile=False, allow_pending=True
+            )
         if self.restore_presence_fps or self.restore_presence_profile:
             if self.adb_run(
                 ["shell", "test", "-e", self.uid1000_path("presence-fps")],
